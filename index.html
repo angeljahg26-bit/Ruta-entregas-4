@@ -1,0 +1,2403 @@
+<!doctype html>
+<html lang="es">
+<head>
+<script>
+  /* Si la URL no trae el parámetro "v", redirige a sí misma agregando
+     un valor único (la hora actual). Esto obliga al navegador y al
+     servidor de GitHub Pages a entregar siempre la versión más
+     reciente del archivo, sin que el usuario tenga que hacer nada. */
+  if (!location.search.includes("v=")) {
+    location.replace(location.pathname + "?v=" + Date.now());
+  }
+</script>
+<script>
+  /* Si algo falla al cargar la app, muestra el error en pantalla
+     (en vez de dejar la pantalla en blanco) para poder diagnosticarlo. */
+  window.addEventListener("error", function (e) {
+    function show() {
+      const box = document.createElement("pre");
+      box.style.cssText = "white-space:pre-wrap;padding:16px;color:#b00020;font-size:14px;font-family:monospace;background:#fff3f3;margin:0;";
+      box.textContent = "Error al cargar la app:\n\n" + (e.message || e) + "\n\nArchivo: " + (e.filename || "?") + "\nLínea: " + (e.lineno || "?");
+      document.body.prepend(box);
+    }
+    if (document.body) show();
+    else document.addEventListener("DOMContentLoaded", show);
+  }, true);
+  window.addEventListener("unhandledrejection", function (e) {
+    function show() {
+      const box = document.createElement("pre");
+      box.style.cssText = "white-space:pre-wrap;padding:16px;color:#b00020;font-size:14px;font-family:monospace;background:#fff3f3;margin:0;";
+      const err = e.reason;
+      box.textContent = "Error al guardar/leer datos (Firebase):\n\n" + (err && err.message ? err.message : String(err)) + (err && err.code ? "\n\nCódigo: " + err.code : "");
+      document.body.prepend(box);
+    }
+    if (document.body) show();
+    else document.addEventListener("DOMContentLoaded", show);
+  });
+</script>
+<meta charset="UTF-8" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>MEDICOM · Rutas y Entregas</title>
+
+<!-- PWA: permite "Instalar app" con ícono propio y pantalla completa -->
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0B3D63" />
+<link rel="icon" href="favicon-32.png" sizes="32x32" />
+<!-- Android (Chrome) -->
+<meta name="mobile-web-app-capable" content="yes" />
+<!-- iOS (Safari) — el manifest.json no basta, iOS necesita estas etiquetas aparte -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="MEDICOM" />
+<link rel="apple-touch-icon" href="icon-180-apple.png" />
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react" >
+
+    /* Guarda los datos en Firebase Realtime Database, así Administrador,
+       Liquidación y Choferes ven la misma información sin importar el
+       dispositivo o navegador que usen. */
+    const firebaseConfig = {
+      apiKey: "AIzaSyAFHI2n1bjnG1NR-wcN1Ys-wjFT1ww3EC4",
+      authDomain: "infinite-deck-484214-e0.firebaseapp.com",
+      databaseURL: "https://infinite-deck-484214-e0-default-rtdb.firebaseio.com",
+      projectId: "infinite-deck-484214-e0",
+    };
+
+    if (!window.storage) {
+      firebase.initializeApp(firebaseConfig);
+      const db = firebase.database();
+      const root = db.ref("logistica-app");
+
+      window.storage = {
+        async get(key) {
+          const snap = await root.child(key).once("value");
+          const val = snap.val();
+          return val === null || val === undefined ? null : { key, value: val, shared: true };
+        },
+        async set(key, value) {
+          await root.child(key).set(value);
+          return { key, value, shared: true };
+        },
+        async delete(key) {
+          await root.child(key).remove();
+          return { key, deleted: true, shared: true };
+        },
+        async list(p = "") {
+          const snap = await root.once("value");
+          const all = snap.val() || {};
+          const keys = Object.keys(all).filter((k) => k.startsWith(p));
+          return { keys, prefix: p, shared: true };
+        },
+        /* Escucha cambios en tiempo real (sin polling): Firebase llama a
+           cb(valor) de inmediato con el dato actual y, después, solo cuando
+           alguien realmente lo modifica. Devuelve una función para dejar de
+           escuchar (llamarla al desmontar el componente o cambiar de ruta). */
+        watch(key, cb) {
+          const ref = root.child(key);
+          const handler = (snap) => cb(snap.val());
+          ref.on("value", handler, (err) => console.error("watch()", key, err));
+          return () => ref.off("value", handler);
+        },
+        /* Escritura atómica en varias rutas a la vez, ej:
+             { "search-index/inv_1": {...}, "search-index/inv_2": null }
+           Un valor `null` borra esa ruta. No afecta nada fuera de las rutas
+           indicadas (a diferencia de re-guardar un objeto completo). */
+        async update(map) {
+          if (!map || Object.keys(map).length === 0) return;
+          await root.update(map);
+        },
+        /* Transacción: fn recibe el valor MÁS RECIENTE del servidor (nunca
+           el que tengas en memoria del navegador) y debe devolver el nuevo
+           valor. Si dos personas guardan casi al mismo tiempo, Firebase
+           reintenta fn solo con la que perdió la carrera — así nadie le
+           borra el cambio a nadie. */
+        async transact(key, fn) {
+          const res = await root.child(key).transaction(fn);
+          return res;
+        },
+      };
+    }
+    const { useState, useEffect } = React;
+
+/* Set de iconos propio (sin dependencias externas), estilo trazo simple */
+function Icon({ size = 20, className = "", color = "currentColor", children }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color}
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      {children}
+    </svg>
+  );
+}
+function Truck(p){return <Icon {...p}><rect x="1" y="7" width="14" height="10" rx="1"/><path d="M15 10h4l3 3v4h-7z"/><circle cx="6" cy="19" r="1.7"/><circle cx="17.5" cy="19" r="1.7"/></Icon>;}
+function Plus(p){return <Icon {...p}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></Icon>;}
+function MapPin(p){return <Icon {...p}><path d="M12 21s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12z"/><circle cx="12" cy="9" r="2.3"/></Icon>;}
+function Camera(p){return <Icon {...p}><path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.5"/></Icon>;}
+function MessageSquare(p){return <Icon {...p}><path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></Icon>;}
+function CheckCircle2(p){return <Icon {...p}><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.3 2.3L16 10"/></Icon>;}
+function XCircle(p){return <Icon {...p}><circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></Icon>;}
+function Clock(p){return <Icon {...p}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></Icon>;}
+function ChevronLeft(p){return <Icon {...p}><path d="M15 18l-6-6 6-6"/></Icon>;}
+function User(p){return <Icon {...p}><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20c1.5-3.8 4.7-5.5 7.5-5.5s6 1.7 7.5 5.5"/></Icon>;}
+function X(p){return <Icon {...p}><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></Icon>;}
+function Package(p){return <Icon {...p}><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></Icon>;}
+function ClipboardList(p){return <Icon {...p}><rect x="5" y="4" width="14" height="17" rx="1.5"/><rect x="9" y="2.5" width="6" height="3" rx="1"/><line x1="8" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="16" y2="14"/><line x1="8" y1="18" x2="13" y2="18"/></Icon>;}
+function ShieldCheck(p){return <Icon {...p}><path d="M12 2l8 3.5v6c0 5-3.4 8.5-8 10.5-4.6-2-8-5.5-8-10.5v-6z"/><path d="M8.5 12l2.3 2.3L15.5 9.5"/></Icon>;}
+function FileSpreadsheet(p){return <Icon {...p}><path d="M6 2h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M14 2v6h6"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="11" y1="13" x2="11" y2="20"/></Icon>;}
+function FileIcon(p){return <Icon {...p}><path d="M6 2h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M14 2v6h6"/></Icon>;}
+function Upload(p){return <Icon {...p}><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 17v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></Icon>;}
+function AlertTriangle(p){return <Icon {...p}><path d="M12 3l10 18H2z"/><line x1="12" y1="9" x2="12" y2="14"/></Icon>;}
+function Pencil(p){return <Icon {...p}><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></Icon>;}
+function Trash(p){return <Icon {...p}><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></Icon>;}
+function Undo2(p){return <Icon {...p}><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 4 3 9 8 9"/></Icon>;}
+function ZoomIn(p){return <Icon {...p}><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></Icon>;}
+
+/* ------------------------------------------------------------------ */
+/* Cuentas y choferes                                                   */
+/* ------------------------------------------------------------------ */
+
+const DRIVERS = [
+  "Paulo Martinez", "Luis Bernardo", "Antonio", "Juan Carlos", "Gazpar",
+  "Horland", "Ramon", "Miguel", "Zajitj", "Juan Gabriel",
+  "Cesar Fletero", "Jesús Fletero", "Tenorio Fletero", "Fletero",
+];
+const ADMIN_ACCOUNTS = { Joahernandez: "Pisa.26" };
+const LIQUIDATOR_ACCOUNTS = { liquidacion1: "Medicom.1", liquidacion2: "Medicom.2" };
+/* Contraseña de cada chofer: su nombre + "26". Los choferes nuevos que
+   despacho agregue y que aún no tengan contraseña propia asignada
+   pueden usar la contraseña genérica mientras se les da de alta. */
+const DRIVER_ACCOUNTS = {
+  "Paulo Martinez": "Paulo26",
+  "Luis Bernardo": "Luis26",
+  "Antonio": "Antonio26",
+  "Juan Carlos": "JuanCarlos26",
+  "Gazpar": "Gazpar26",
+  "Horland": "Horland26",
+  "Ramon": "Ramon26",
+  "Miguel": "Miguel26",
+  "Zajitj": "Zajitj26",
+  "Juan Gabriel": "JuanGabriel26",
+  "Cesar Fletero": "Fletes.11",
+  "Jesús Fletero": "Fletes.11",
+  "Tenorio Fletero": "Fletes.11",
+  "Fletero": "Fletes.11",
+};
+const DEFAULT_DRIVER_PASSWORD = "Medicom.chofer";
+
+/* Nombre oficial de cada zona (ZT) según el rol semanal de rutas.
+   Se usa para sugerir el nombre de la ruta al importar el Excel. */
+const ZT_NAMES = {
+  "E-E060": "Lagos", "E-E520": "Arandas", "E-E030": "Chapala", "E-E540": "Ocotlán",
+  "E-E530": "Chapala Tec", "E-E590": "Cd. Guzmán", "E-E521": "Norte", "E-E502": "Centro",
+  "E-E511": "Sur", "E-E570": "Vallarta", "COMODIN": "Comodín",
+  "E-N502": "Tepic-Tec", "E-N001": "Tepic/Valla", "E-E050": "La Barca", "E-M001": "Sahuayo",
+  "E-E510": "Amecatec", "E-E574": "Colimatec", "DIMUFLO": "Especial",
+  "E-E580": "Tepa Tec", "E-E080": "Tepa", "E-E500": "Zamora", "E-E524": "Tequila",
+  "E-E040": "Cocula", "E-E594": "Autlán",
+  "E-E020": "Arandas", "E-M501": "Sahuayo", "E-E515": "Manzanillo", "E-E584": "Tizapán",
+  "E-C001": "Manzanillo", "E-E550": "Yahualica", "E-E070": "Vallarta", "E-D500": "La Piedad",
+  "Z-001": "Zacatecas",
+};
+
+/* ------------------------------------------------------------------ */
+/* Capa de datos (window.storage, compartida entre todos los roles)    */
+/* ------------------------------------------------------------------ */
+
+const INDEX_KEY = "routes-index";
+
+async function getIndex() {
+  const res = await window.storage.get(INDEX_KEY, true);
+  return res ? JSON.parse(res.value) : [];
+}
+async function saveIndex(list) {
+  await window.storage.set(INDEX_KEY, JSON.stringify(list), true);
+}
+async function getRoute(id) {
+  const res = await window.storage.get(`route:${id}`, true);
+  return res ? JSON.parse(res.value) : null;
+}
+async function saveRoute(route) {
+  await window.storage.set(`route:${route.id}`, JSON.stringify(route), true);
+}
+async function deleteRouteData(id) {
+  await window.storage.delete(`route:${id}`, true);
+}
+function newId(prefix) {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+/* Cambia una entrada de routes-index usando SIEMPRE el valor más
+   reciente del servidor (nunca el `index` que tengas en el estado de
+   React). Así, si dos personas guardan casi al mismo tiempo —dos
+   choferes, o el admin y un chofer—, ninguno le borra el cambio al
+   otro. updateFn recibe el arreglo actual completo y devuelve el
+   nuevo. No hace falta llamar setIndex después: los listeners
+   watch(INDEX_KEY, ...) ya activos reciben el resultado solos. */
+async function updateIndex(updateFn) {
+  await window.storage.transact(INDEX_KEY, (raw) => {
+    const list = raw ? JSON.parse(raw) : [];
+    return JSON.stringify(updateFn(list));
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Fotos (evidencias de entrega/devolución y adjuntos de liquidación)  */
+/* SEPARADAS de las rutas — viven en su propio nodo raíz, cada una en  */
+/* su propia clave. Como RTDB re-sincroniza el nodo completo ante      */
+/* cualquier cambio de un hijo, si las fotos vivieran dentro del        */
+/* objeto de la ruta, CADA cambio de estatus de CUALQUIER factura       */
+/* obligaría a todos los clientes conectados a esa ruta a re-descargar */
+/* TODAS sus fotos. Separadas así, la ruta solo guarda un booleano      */
+/* (hasPhoto) y la foto se pide aparte, solo cuando alguien la abre.    */
+/* ------------------------------------------------------------------ */
+const PHOTOS_KEY = "logistica-fotos";
+
+async function savePhoto(photoId, dataUrl) {
+  await window.storage.set(`${PHOTOS_KEY}/${photoId}`, dataUrl);
+}
+async function fetchPhoto(photoId) {
+  const res = await window.storage.get(`${PHOTOS_KEY}/${photoId}`);
+  return res ? res.value : null;
+}
+async function deletePhoto(photoId) {
+  await window.storage.delete(`${PHOTOS_KEY}/${photoId}`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Índice de búsqueda (para VentasView) — SOLO texto, sin fotos.       */
+/* Cada factura vive en "search-index/{invId}" como un objeto pequeño */
+/* (no como el JSON gigante de la ruta completa), así buscar no        */
+/* implica descargar megabytes de imágenes en Base64.                  */
+/* ------------------------------------------------------------------ */
+const SEARCH_INDEX_KEY = "search-index";
+
+function invoiceSearchEntry(route, inv) {
+  return {
+    id: inv.id,
+    factura: inv.factura || "",
+    pedido: inv.pedido || "",
+    cliente: inv.cliente || "",
+    destino: inv.destino || "",
+    direccion: inv.direccion || "",
+    status: inv.status || "pendiente",
+    comment: inv.comment || null,
+    faltante: !!inv.faltante,
+    incidencia: inv.incidencia || null,
+    hasPhoto: !!(inv.hasPhoto || inv.photo),
+    updatedAt: inv.updatedAt || Date.now(),
+    routeId: route.id,
+    routeName: route.name,
+    driverName: route.driverName,
+  };
+}
+/* Reescribe en el índice la entrada de cada factura de esta ruta
+   (crear/editar factura, cambiar estatus, renombrar ruta, etc). No
+   borra facturas que ya no estén en route.invoices; para eso usa
+   removeInvoiceFromSearchIndex / removeRouteFromSearchIndex. */
+async function syncSearchIndex(route) {
+  const map = {};
+  (route.invoices || []).forEach((inv) => {
+    map[`${SEARCH_INDEX_KEY}/${inv.id}`] = invoiceSearchEntry(route, inv);
+  });
+  await window.storage.update(map);
+}
+async function removeInvoiceFromSearchIndex(invId) {
+  await window.storage.update({ [`${SEARCH_INDEX_KEY}/${invId}`]: null });
+}
+async function removeRouteFromSearchIndex(route) {
+  const map = {};
+  (route.invoices || []).forEach((inv) => { map[`${SEARCH_INDEX_KEY}/${inv.id}`] = null; });
+  await window.storage.update(map);
+}
+/* Totales de una ruta (entregadas/fallidas/total), sin fotos. Se guardan
+   directamente en routes-index para que las tarjetas de ruta (RouteRow)
+   puedan pintar la barra de progreso sin tener que descargar la ruta
+   completa (con todas sus fotos) solo para contar estatus. */
+function routeCounts(invoices) {
+  const list = invoices || [];
+  return {
+    total: list.length,
+    ok: list.filter((i) => i.status === "entregado").length,
+    bad: list.filter((i) => i.status === "fallido").length,
+  };
+}
+function applyRouteCountsToIndex(list, routeId, invoices) {
+  const counts = routeCounts(invoices);
+  return list.map((r) => (r.id === routeId ? { ...r, ...counts } : r));
+}
+
+/* Migración única (botón de Admin): hace tres cosas sobre TODAS las
+   rutas existentes, una sola vez, a demanda —nunca automáticamente ni
+   en un timer—:
+   1) Reconstruye el índice de búsqueda de Ventas.
+   2) Reconstruye los contadores de routes-index (barra de progreso).
+   3) Aplana fotos que hayan quedado embebidas dentro de rutas viejas
+      (de antes de esta versión): las saca a logistica-fotos/{id} y dep
+      deja solo hasPhoto:true en la factura, para que esa ruta deje de
+      pesar megabytes cada vez que alguien la abre o alguien más edita
+      otra factura de la misma ruta.
+   El resultado del índice se combina con updateIndex() (transacción),
+   nunca sobrescribiendo el arreglo completo, para no pisar cambios que
+   otros usuarios guarden mientras esto corre. */
+async function rebuildSearchIndex(onProgress) {
+  const idx = await getIndex();
+  const map = {};
+  const computed = {};
+  let photosFlattened = 0;
+  for (let i = 0; i < idx.length; i++) {
+    const r = await getRoute(idx[i].id);
+    if (r) {
+      let changed = false;
+      const invoices = [];
+      for (const inv of (r.invoices || [])) {
+        if (inv.photo && !inv.hasPhoto) {
+          await savePhoto(inv.id, inv.photo);
+          const { photo, ...rest } = inv;
+          invoices.push({ ...rest, hasPhoto: true });
+          changed = true;
+          photosFlattened++;
+        } else {
+          invoices.push(inv);
+        }
+      }
+      let liquidacion = r.liquidacion;
+      if (liquidacion && liquidacion.photo && !(liquidacion.attachment && liquidacion.attachment.name)) {
+        await savePhoto(`liq-${r.id}`, liquidacion.photo);
+        liquidacion = { ...liquidacion, photo: null, attachment: { name: "foto.jpg", type: "image/jpeg" } };
+        changed = true;
+        photosFlattened++;
+      }
+      if (changed) await saveRoute({ ...r, invoices, liquidacion });
+      invoices.forEach((inv) => { map[`${SEARCH_INDEX_KEY}/${inv.id}`] = invoiceSearchEntry(r, inv); });
+      computed[idx[i].id] = { ...routeCounts(invoices), liquidacionStatus: liquidacion ? liquidacion.status : null };
+    }
+    if (onProgress) onProgress(i + 1, idx.length);
+  }
+  await window.storage.update(map);
+  await updateIndex((list) => list.map((r) => (computed[r.id] ? { ...r, ...computed[r.id] } : r)));
+  return { invoices: Object.keys(map).length, photosFlattened };
+}
+
+/* Comprime una foto a base64 (máx 900px, jpeg 0.6) para no exceder límites */
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const maxW = 900;
+        const scale = Math.min(1, maxW / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.6));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/* Obtiene la ubicación GPS actual; si el chofer no da permiso o el
+   teléfono no puede obtenerla, resuelve null sin romper el flujo. */
+function getLocation() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }
+    );
+  });
+}
+
+/* Convierte un valor de celda de folio/código a texto limpio (sin .0) */
+function cleanFolio(v) {
+  if (v === null || v === undefined || v === "") return "";
+  if (typeof v === "number") return String(Math.trunc(v));
+  return String(v).trim();
+}
+
+/* Texto a mostrar como identificador de una factura: prioriza el número
+   de Factura; si todavía no la generan, aclara que se muestra el Pedido. */
+function invoiceLabel(inv) {
+  if (inv.factura) return `#${inv.factura}`;
+  if (inv.pedido) return `Pedido ${inv.pedido} (sin factura)`;
+  return "Sin folio";
+}
+function invoiceFileTag(inv) {
+  return inv.factura || inv.pedido || inv.id;
+}
+function mapsLink(loc) {
+  return `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
+}
+/* Fecha y hora exacta en que se guardó una foto/estatus, para poder ver
+   el orden real en que el chofer fue completando sus entregas. */
+function formatDateTime(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleString("es-MX", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/* Busca una columna por nombre tolerando espacios extra / mayúsculas distintas */
+function getField(row, name) {
+  if (name in row) return row[name];
+  const target = name.trim().toLowerCase();
+  const key = Object.keys(row).find((k) => k.trim().toLowerCase() === target);
+  return key ? row[key] : "";
+}
+
+/*
+ * Lee un archivo .xlsx/.csv de rutas y lo agrupa por código de "Ruta".
+ * Columnas que reconoce (nombres tal cual el reporte de despacho):
+ *   Destinatario mcía. (código de destino), Ruta, Pedido, Factura,
+ *   Fecha salida mcías., Ruta Texto (población) y
+ *   Nombre destinatario de mercancías (nombre del destino).
+ * Si una fila no trae Factura todavía, se usa el Pedido como folio
+ * temporal para no perder esa entrega del reporte.
+ * Devuelve: [{ code, locality, invoices: [...], skipped }]
+ */
+async function parseRoutesExcel(file) {
+  const isCsv = /\.csv$/i.test(file.name);
+  let wb;
+  if (isCsv) {
+    const text = await file.text();
+    wb = XLSX.read(text, { type: "string" });
+  } else {
+    const buf = await file.arrayBuffer();
+    wb = XLSX.read(new Uint8Array(buf), { type: "array" });
+  }
+
+  // Revisa TODAS las hojas del archivo (no solo la primera) y se queda
+  // con la que produzca más facturas válidas — así no depende de que
+  // la hoja se llame "Hoja1" ni de que sea la primera pestaña.
+  let best = null;
+  for (const sheetName of wb.SheetNames) {
+    // Se lee en modo "arreglo de arreglos" y los encabezados se toman
+    // manualmente de la primera fila. Esto evita depender de cómo la
+    // librería adivina las columnas, que puede variar según cómo se
+    // haya generado el archivo .xlsx original.
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, defval: "", raw: true });
+    if (!aoa.length) continue;
+    const headers = aoa[0].map((h) => String(h ?? "").trim());
+    const rows = aoa
+      .slice(1)
+      .filter((arr) => arr.some((c) => String(c ?? "").trim() !== ""))
+      .map((arr) => {
+        const obj = {};
+        headers.forEach((h, i) => { obj[h] = arr[i] ?? ""; });
+        return obj;
+      });
+    const groups = new Map();
+    let skipped = 0;
+
+    for (const row of rows) {
+      const code = String(getField(row, "Ruta") || "").trim();
+      const factura = cleanFolio(getField(row, "Factura"));
+      const pedido = cleanFolio(getField(row, "Pedido"));
+      if (!code || (!factura && !pedido)) { skipped++; continue; }
+
+      const destino = cleanFolio(getField(row, "Destinatario mcía."));
+      const cliente = String(getField(row, "Nombre destinatario de mercancías") || "Sin nombre").trim();
+      const locality = String(getField(row, "Ruta Texto") || "Sin localidad").trim();
+      const fecha = String(getField(row, "Fecha salida mcías.") || "").trim();
+
+      if (!groups.has(code)) groups.set(code, { code, locality, invoices: [] });
+      const g = groups.get(code);
+      g.invoices.push({ factura, pedido, destino, cliente, direccion: locality || "Sin localidad", fecha });
+      if (!g.locality) g.locality = locality;
+    }
+
+    const groupsArr = Array.from(groups.values());
+    const totalInvoices = groupsArr.reduce((a, g) => a + g.invoices.length, 0);
+    const bestInvoices = best ? best.groups.reduce((a, g) => a + g.invoices.length, 0) : -1;
+    if (totalInvoices > bestInvoices) {
+      best = { groups: groupsArr, skipped, totalRows: rows.length, headers, sheetName, sheetNames: wb.SheetNames };
+    }
+  }
+
+  return best;
+}
+
+/* ------------------------------------------------------------------ */
+/* Estilos base compartidos — paleta MEDICOM (azules + blanco)         */
+/* ------------------------------------------------------------------ */
+
+const GlobalStyle = () => (
+  <style>{`
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+    .lg-root {
+      --dark: #0B3D63;
+      --dark-2: #14538A;
+      --brand: #2F86D9;
+      --brand-light: #CFE6F7;
+      --paper: #F5FAFD;
+      --card: #FFFFFF;
+      --ink: #10263B;
+      --muted: #5E7891;
+      --line: #D7E6F0;
+      --ok: #1E8E4F;
+      --ok-bg: #E9F7EE;
+      --bad: #C93B2E;
+      --bad-bg: #FCEBE9;
+      --warn: #B45309;
+      --warn-bg: #FEF3E2;
+      --pend-bg: #FFFFFF;
+      font-family: 'IBM Plex Sans', system-ui, sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+      min-height: 100%;
+    }
+    .lg-mono { font-family: 'IBM Plex Mono', monospace; }
+    .lg-btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      border-radius: 10px; font-weight: 600; font-size: 15px; padding: 14px 18px;
+      border: none; cursor: pointer; transition: transform .08s ease, opacity .15s ease;
+    }
+    .lg-btn:active { transform: scale(0.97); }
+    .lg-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .lg-btn-brand { background: var(--brand); color: #fff; }
+    .lg-btn-dark { background: var(--dark); color: #fff; }
+    .lg-btn-dark2 { background: var(--dark-2); color: #fff; }
+    .lg-btn-ok { background: var(--ok); color: #fff; }
+    .lg-btn-bad { background: var(--bad); color: #fff; }
+    .lg-btn-ghost { background: transparent; color: var(--ink); border: 1.5px solid var(--line); }
+    .lg-btn-outline-brand { background: #fff; color: var(--brand); border: 1.5px solid var(--brand); }
+    .lg-input {
+      width: 100%; border: 1.5px solid var(--line); border-radius: 10px;
+      padding: 13px 14px; font-size: 15px; background: #fff; color: var(--ink);
+      font-family: inherit;
+    }
+    .lg-input:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
+    .lg-card {
+      background: var(--card); border: 1.5px solid var(--line); border-radius: 14px;
+    }
+    .lg-icon-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px; border-radius: 8px; border: 1.5px solid var(--line);
+      background: #fff; color: var(--muted); cursor: pointer; flex-shrink: 0;
+    }
+    .lg-icon-btn:active { transform: scale(0.93); }
+    .lg-icon-btn-danger { color: var(--bad); border-color: var(--bad); }
+    .lg-scrim {
+      position: fixed; inset: 0; background: rgba(11,61,99,0.45);
+      display: flex; align-items: flex-end; justify-content: center; z-index: 50;
+    }
+    @media (min-width: 640px) {
+      .lg-scrim { align-items: center; }
+    }
+    .lg-sheet {
+      background: #fff; width: 100%; max-width: 480px; border-radius: 18px 18px 0 0;
+      padding: 22px 20px calc(22px + env(safe-area-inset-bottom));
+      max-height: 88vh; overflow-y: auto;
+    }
+    @media (min-width: 640px) {
+      .lg-sheet { border-radius: 18px; }
+    }
+    .lg-file-input {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; white-space: nowrap; border: 0; opacity: 0;
+    }
+  `}</style>
+);
+
+/* ------------------------------------------------------------------ */
+/* Piezas visuales de estatus                                          */
+/* ------------------------------------------------------------------ */
+
+const STATUS = {
+  pendiente: { label: "Pendiente", bg: "var(--pend-bg)", fg: "var(--muted)", border: "var(--line)" },
+  entregado: { label: "Entregado", bg: "var(--ok-bg)", fg: "var(--ok)", border: "var(--ok)" },
+  fallido: { label: "No entregado", bg: "var(--bad-bg)", fg: "var(--bad)", border: "var(--bad)" },
+};
+
+function StatusPill({ status }) {
+  const s = STATUS[status] || STATUS.pendiente;
+  const Icon = status === "entregado" ? CheckCircle2 : status === "fallido" ? XCircle : Clock;
+  return (
+    <span
+      style={{ background: s.bg, color: s.fg, border: `1.5px solid ${s.border}` }}
+      className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full"
+    >
+      <Icon size={13} /> {s.label}
+    </span>
+  );
+}
+
+function LiquidacionPill({ status }) {
+  if (status === "liquidado") {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full"
+        style={{ background: "var(--ok-bg)", color: "var(--ok)", border: "1.5px solid var(--ok)" }}>
+        <CheckCircle2 size={12} /> Liquidado
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full"
+      style={{ background: "var(--pend-bg)", color: "var(--muted)", border: "1.5px solid var(--line)" }}>
+      <Clock size={12} /> Sin liquidar
+    </span>
+  );
+}
+
+function ProgressBar({ invoices, counts }) {
+  const c = counts || routeCounts(invoices);
+  const total = c.total || 1;
+  const ok = c.ok;
+  const bad = c.bad;
+  const pend = Math.max(0, c.total - ok - bad);
+  return (
+    <div>
+      <div className="flex h-2.5 w-full rounded-full overflow-hidden" style={{ background: "var(--line)" }}>
+        <div style={{ width: `${(ok / total) * 100}%`, background: "var(--ok)" }} />
+        <div style={{ width: `${(bad / total) * 100}%`, background: "var(--bad)" }} />
+      </div>
+      <div className="flex gap-3 mt-1.5 text-xs" style={{ color: "var(--muted)" }}>
+        <span>{ok} entregadas</span>
+        <span>{bad} fallidas</span>
+        <span>{pend} pendientes</span>
+      </div>
+    </div>
+  );
+}
+
+/* Selector de chofer: lista fija de nombres, con opción de escribir otro
+   si despacho necesita asignar a alguien que aún no está en la lista. */
+function DriverPicker({ value, onChange, placeholder }) {
+  const [custom, setCustom] = useState(Boolean(value) && !DRIVERS.includes(value));
+  if (custom) {
+    return (
+      <div className="flex flex-col gap-1">
+        <input
+          className="lg-input"
+          placeholder={placeholder || "Nombre del chofer"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <button type="button" className="text-xs font-medium underline self-start" style={{ color: "var(--brand)" }}
+          onClick={() => { setCustom(false); onChange(""); }}>
+          Elegir de la lista
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <select className="lg-input" value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{placeholder || "Selecciona un chofer"}</option>
+        {DRIVERS.map((d) => <option key={d} value={d}>{d}</option>)}
+      </select>
+      <button type="button" className="text-xs font-medium underline self-start" style={{ color: "var(--brand)" }}
+        onClick={() => setCustom(true)}>
+        Escribir otro nombre
+      </button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Pantalla de acceso                                                   */
+/* ------------------------------------------------------------------ */
+
+function RoleGate({ onEnter }) {
+  const [role, setRole] = useState(null);
+  const [driverName, setDriverName] = useState("");
+  const [user, setUser] = useState("");
+  const [pass, setPass] = useState("");
+  const [error, setError] = useState("");
+
+  function backToStart() {
+    setRole(null);
+    setError("");
+    setUser("");
+    setPass("");
+  }
+
+  function tryLogin(accounts, roleName, friendlyName) {
+    const key = Object.keys(accounts).find((u) => u.toLowerCase() === user.trim().toLowerCase());
+    if (key && accounts[key] === pass) {
+      onEnter(roleName, friendlyName || key);
+    } else {
+      setError("Usuario o contraseña incorrectos.");
+    }
+  }
+
+  return (
+    <div className="lg-root min-h-screen flex flex-col">
+      <GlobalStyle />
+      <div className="flex-1 flex flex-col justify-center px-6 py-10 max-w-sm mx-auto w-full">
+        <div className="flex items-center gap-3 mb-1">
+          <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0" style={{ background: "var(--dark)" }}>
+            <Truck size={22} color="#fff" />
+          </div>
+          <div>
+            <p className="font-bold text-xl leading-none">MEDICOM</p>
+            <p className="text-xs mt-1" style={{ color: "var(--muted)" }}>Ruta y control de entregas</p>
+          </div>
+        </div>
+        <h1 className="text-2xl font-semibold mt-6 mb-1">Entregas del día</h1>
+        <p style={{ color: "var(--muted)" }} className="text-sm mb-8">
+          Elige cómo vas a entrar. Los datos se comparten entre despacho, liquidación y choferes.
+        </p>
+
+        {!role && (
+          <div className="flex flex-col gap-3">
+            <button className="lg-btn lg-btn-dark !justify-between !py-5" onClick={() => setRole("admin")}>
+              <span className="flex items-center gap-3"><ClipboardList size={20} /> Despacho (Administrador)</span>
+              <ChevronLeft size={18} className="rotate-180" />
+            </button>
+            <button className="lg-btn lg-btn-dark2 !justify-between !py-5" onClick={() => setRole("liquidador")}>
+              <span className="flex items-center gap-3"><ShieldCheck size={20} /> Liquidación de ruta</span>
+              <ChevronLeft size={18} className="rotate-180" />
+            </button>
+            <button className="lg-btn lg-btn-outline-brand !justify-between !py-5" onClick={() => onEnter("ventas", "Ventas")}>
+              <span className="flex items-center gap-3"><FileSpreadsheet size={20} /> Representantes de venta</span>
+              <ChevronLeft size={18} className="rotate-180" />
+            </button>
+            <button className="lg-btn lg-btn-brand !justify-between !py-5" onClick={() => setRole("driver")}>
+              <span className="flex items-center gap-3"><Truck size={20} /> Soy chofer</span>
+              <ChevronLeft size={18} className="rotate-180" />
+            </button>
+          </div>
+        )}
+
+        {role === "driver" && (
+          <div className="flex flex-col gap-3">
+            <label className="text-sm font-medium">¿Cuál es tu nombre?</label>
+            <DriverPicker value={driverName} onChange={(v) => { setDriverName(v); setError(""); }} placeholder="Selecciona tu nombre" />
+            <label className="text-sm font-medium">Contraseña</label>
+            <input className="lg-input" type="password" value={pass}
+              onChange={(e) => { setPass(e.target.value); setError(""); }} />
+            {error && <p className="text-sm" style={{ color: "var(--bad)" }}>{error}</p>}
+            <button
+              className="lg-btn lg-btn-brand mt-1"
+              disabled={!driverName.trim() || !pass}
+              onClick={() => {
+                const expected = DRIVER_ACCOUNTS[driverName] || DEFAULT_DRIVER_PASSWORD;
+                if (pass === expected) onEnter("driver", driverName.trim());
+                else setError("Contraseña incorrecta.");
+              }}
+            >
+              Ver mis rutas
+            </button>
+            <button className="lg-btn lg-btn-ghost" onClick={backToStart}>Regresar</button>
+          </div>
+        )}
+
+        {(role === "admin" || role === "liquidador") && (
+          <div className="flex flex-col gap-3">
+            <div>
+              <label className="text-sm font-medium">Usuario</label>
+              <input className="lg-input mt-1" value={user} autoCapitalize="none" autoFocus
+                onChange={(e) => { setUser(e.target.value); setError(""); }} />
+            </div>
+            <div>
+              <label className="text-sm font-medium">Contraseña</label>
+              <input className="lg-input mt-1" type="password" value={pass}
+                onChange={(e) => { setPass(e.target.value); setError(""); }} />
+            </div>
+            {error && <p className="text-sm" style={{ color: "var(--bad)" }}>{error}</p>}
+            <button
+              className="lg-btn lg-btn-brand mt-1"
+              disabled={!user.trim() || !pass}
+              onClick={() => {
+                if (role === "admin") tryLogin(ADMIN_ACCOUNTS, "admin", "Despacho");
+                else tryLogin(LIQUIDATOR_ACCOUNTS, "liquidador");
+              }}
+            >
+              Entrar
+            </button>
+            <button className="lg-btn lg-btn-ghost" onClick={backToStart}>Regresar</button>
+          </div>
+        )}
+      </div>
+      <p className="text-center text-xs pb-4" style={{ color: "var(--muted)", opacity: 0.6 }}>
+        Desarrollado por JAHG
+      </p>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Vista Administrador                                                  */
+/* ------------------------------------------------------------------ */
+
+function AdminView({ onExit }) {
+  const [index, setIndex] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [route, setRoute] = useState(null);
+  const [showNewRoute, setShowNewRoute] = useState(false);
+  const [showNewInvoice, setShowNewInvoice] = useState(false);
+  const [editingInvoice, setEditingInvoice] = useState(null);
+  const [editingRoute, setEditingRoute] = useState(false);
+  const [showPrevious, setShowPrevious] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
+
+  // Escucha el índice de rutas en tiempo real: Firebase avisa solo cuando
+  // alguien crea/borra/renombra una ruta, sin volver a preguntar cada 4s.
+  useEffect(() => {
+    const unwatch = window.storage.watch(INDEX_KEY, (raw) => {
+      setIndex(raw ? JSON.parse(raw) : []);
+    });
+    return unwatch;
+  }, []);
+  // Igual para la ruta abierta: solo baja datos nuevos (y sus fotos)
+  // cuando esa ruta específica cambia de verdad.
+  useEffect(() => {
+    if (!selectedId) { setRoute(null); return; }
+    const unwatch = window.storage.watch(`route:${selectedId}`, (raw) => {
+      setRoute(raw ? JSON.parse(raw) : null);
+    });
+    return unwatch;
+  }, [selectedId]);
+
+  async function handleRebuildSearchIndex() {
+    if (!window.confirm("Esto revisa todas las rutas existentes: actualiza el buscador de Ventas, los contadores de progreso y saca a otro lugar las fotos que hayan quedado guardadas dentro de rutas viejas. Puede tardar un momento y solo hace falta ejecutarlo una vez. ¿Continuar?")) return;
+    setRebuilding(true);
+    try {
+      const { invoices, photosFlattened } = await rebuildSearchIndex();
+      window.alert(`Listo. Índice actualizado (${invoices} facturas)${photosFlattened ? `, ${photosFlattened} foto(s) separadas de sus rutas` : ""}.`);
+    } catch (err) {
+      window.alert("No se pudo completar el mantenimiento: " + (err && err.message ? err.message : err));
+    } finally {
+      setRebuilding(false);
+    }
+  }
+
+  async function createRoute(name, driverName) {
+    const r = { id: newId("route"), name, driverName, createdAt: Date.now(), invoices: [] };
+    await saveRoute(r);
+    await updateIndex((list) => [{ id: r.id, name, driverName, createdAt: r.createdAt, total: 0, ok: 0, bad: 0 }, ...list]);
+    setSelectedId(r.id);
+    setShowNewRoute(false);
+  }
+
+  async function importRoutes(groupsWithDriver) {
+    // groupsWithDriver: [{ code, locality, driverName, routeName, invoices }]
+    const newRoutesMeta = [];
+    for (const g of groupsWithDriver) {
+      const route = {
+        id: newId("route"),
+        name: g.routeName,
+        driverName: g.driverName,
+        createdAt: Date.now(),
+        invoices: g.invoices.map((inv) => ({
+          id: newId("inv"),
+          factura: inv.factura || "",
+          pedido: inv.pedido || "",
+          destino: inv.destino || "",
+          cliente: inv.cliente,
+          direccion: inv.direccion,
+          fecha: inv.fecha || "",
+          status: "pendiente",
+          hasPhoto: false,
+          comment: null,
+          updatedAt: Date.now(),
+        })),
+      };
+      await saveRoute(route);
+      await syncSearchIndex(route);
+      newRoutesMeta.push({ id: route.id, name: route.name, driverName: route.driverName, createdAt: route.createdAt, ...routeCounts(route.invoices) });
+    }
+    await updateIndex((list) => [...newRoutesMeta, ...list]);
+    setShowImport(false);
+  }
+
+  async function addInvoice(data) {
+    if (!route) return;
+    const inv = {
+      id: newId("inv"), factura: data.factura || "", pedido: data.pedido || "", destino: "",
+      cliente: data.cliente, direccion: data.direccion, fecha: "",
+      status: "pendiente", hasPhoto: false, comment: null, updatedAt: Date.now(),
+    };
+    const updated = { ...route, invoices: [...route.invoices, inv] };
+    await saveRoute(updated);
+    setRoute(updated);
+    await syncSearchIndex(updated);
+    await updateIndex((list) => applyRouteCountsToIndex(list, route.id, updated.invoices));
+    setShowNewInvoice(false);
+  }
+
+  async function updateInvoice(id, data) {
+    const updated = {
+      ...route,
+      invoices: route.invoices.map((inv) => (inv.id === id ? { ...inv, ...data } : inv)),
+    };
+    await saveRoute(updated);
+    setRoute(updated);
+    await syncSearchIndex(updated);
+    await updateIndex((list) => applyRouteCountsToIndex(list, route.id, updated.invoices));
+    setEditingInvoice(null);
+  }
+
+  async function deleteInvoice(id) {
+    if (!window.confirm("¿Eliminar esta factura de la ruta? No se puede deshacer.")) return;
+    const updated = { ...route, invoices: route.invoices.filter((inv) => inv.id !== id) };
+    await saveRoute(updated);
+    setRoute(updated);
+    await removeInvoiceFromSearchIndex(id);
+    await deletePhoto(id);
+    await updateIndex((list) => applyRouteCountsToIndex(list, route.id, updated.invoices));
+  }
+
+  async function resetInvoiceStatus(id) {
+    if (!window.confirm("¿Marcar esta factura como Pendiente de nuevo? Se borrará la foto, el comentario y la ubicación guardados.")) return;
+    await deletePhoto(id);
+    await updateInvoice(id, { status: "pendiente", hasPhoto: false, comment: null, location: null });
+  }
+
+  async function removeRoute(id) {
+    if (!window.confirm("¿Eliminar esta ruta completa, con todas sus facturas? No se puede deshacer.")) return;
+    if (route && route.id === id) {
+      await removeRouteFromSearchIndex(route);
+      await Promise.all(route.invoices.map((inv) => deletePhoto(inv.id)));
+      if (route.liquidacion && route.liquidacion.attachment) await deletePhoto(`liq-${route.id}`);
+    }
+    await deleteRouteData(id);
+    await updateIndex((list) => list.filter((r) => r.id !== id));
+    setSelectedId(null);
+  }
+
+  async function updateRouteMeta(name, driverName, dateStr) {
+    let createdAt = route.createdAt;
+    if (dateStr) {
+      const [y, m, d] = dateStr.split("-").map(Number);
+      const dt = new Date(route.createdAt);
+      dt.setFullYear(y, m - 1, d);
+      createdAt = dt.getTime();
+    }
+    const updated = { ...route, name, driverName, createdAt };
+    await saveRoute(updated);
+    setRoute(updated);
+    await syncSearchIndex(updated);
+    await updateIndex((list) => list.map((r) => (r.id === route.id ? { ...r, name, driverName, createdAt } : r)));
+    setEditingRoute(false);
+  }
+
+  if (route) {
+    return (
+      <div className="lg-root min-h-screen">
+        <GlobalStyle />
+        <Header
+          title={route.name}
+          subtitle={`Asignada a ${route.driverName}`}
+          onBack={() => setSelectedId(null)}
+          dark
+          right={
+            <div className="flex items-center gap-1">
+              <button className="lg-icon-btn" style={{ borderColor: "transparent", background: "transparent", color: "#fff" }}
+                onClick={() => setEditingRoute(true)} title="Editar ruta">
+                <Pencil size={18} />
+              </button>
+              <button className="lg-icon-btn" style={{ borderColor: "transparent", background: "transparent", color: "#fff" }}
+                onClick={() => removeRoute(route.id)} title="Eliminar ruta">
+                <Trash size={18} />
+              </button>
+            </div>
+          }
+        />
+        <div className="max-w-lg mx-auto px-4 py-5">
+          <div className="lg-card p-4 mb-5">
+            <ProgressBar invoices={route.invoices} />
+          </div>
+
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold">Facturas ({route.invoices.length})</h2>
+            <button className="lg-btn lg-btn-brand !py-2 !px-3 text-sm" onClick={() => setShowNewInvoice(true)}>
+              <Plus size={16} /> Agregar
+            </button>
+          </div>
+
+          <div className="flex flex-col gap-2.5">
+            {route.invoices.length === 0 && (
+              <EmptyState text="Todavía no hay facturas en esta ruta. Agrega la primera." />
+            )}
+            {route.invoices.map((inv) => (
+              <div key={inv.id} className="lg-card p-3.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="lg-mono text-xs" style={{ color: "var(--muted)" }}>{invoiceLabel(inv)}</p>
+                    <p className="font-semibold truncate">{inv.cliente}</p>
+                    <p className="text-sm truncate" style={{ color: "var(--muted)" }}>
+                      <MapPin size={12} className="inline mr-1 -mt-0.5" />{inv.direccion}
+                    </p>
+                    {((inv.factura && inv.pedido) || inv.destino || inv.fecha) && (
+                      <p className="lg-mono text-xs mt-1" style={{ color: "var(--muted)" }}>
+                        {inv.factura && inv.pedido && <>Pedido {inv.pedido}</>}
+                        {inv.destino && <> · Cód. {inv.destino}</>}
+                        {inv.fecha && <> · {inv.fecha}</>}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex flex-col items-end gap-1.5 shrink-0">
+                    <StatusPill status={inv.status} />
+                    <div className="flex gap-1">
+                      <button className="lg-icon-btn" title="Editar" onClick={() => setEditingInvoice(inv)}>
+                        <Pencil size={14} />
+                      </button>
+                      {inv.status !== "pendiente" && (
+                        <button className="lg-icon-btn" title="Marcar como pendiente" onClick={() => resetInvoiceStatus(inv.id)}>
+                          <Undo2 size={14} />
+                        </button>
+                      )}
+                      <button className="lg-icon-btn lg-icon-btn-danger" title="Eliminar" onClick={() => deleteInvoice(inv.id)}>
+                        <Trash size={14} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                {inv.status === "fallido" && inv.comment && (
+                  <p className="text-sm mt-2 rounded-md p-2" style={{ background: "var(--bad-bg)", color: "var(--bad)" }}>
+                    <MessageSquare size={13} className="inline mr-1 -mt-0.5" />{inv.comment}
+                  </p>
+                )}
+                {inv.status === "entregado" && inv.faltante && (
+                  <p className="text-sm mt-2 rounded-md p-2" style={{ background: "var(--warn-bg)", color: "var(--warn)" }}>
+                    <AlertTriangle size={13} className="inline mr-1 -mt-0.5" />Faltante: {inv.incidencia || "sin detalle"}
+                  </p>
+                )}
+                {inv.status === "fallido" && (inv.hasPhoto || inv.photo) && (
+                  <div className="mt-2 flex items-center gap-3 flex-wrap">
+                    <EvidenceButton photoId={inv.id} inlineSrc={inv.photo || null} label="Ver formato de devolución" downloadName={`devolucion_${invoiceFileTag(inv)}.jpg`} />
+                    {inv.location && (
+                      <a href={mapsLink(inv.location)} target="_blank" rel="noreferrer" className="text-xs font-medium underline" style={{ color: "var(--brand)" }}>
+                        Ver ubicación
+                      </a>
+                    )}
+                    <span className="lg-mono text-xs" style={{ color: "var(--muted)" }}>{formatDateTime(inv.updatedAt)}</span>
+                  </div>
+                )}
+                {inv.status === "entregado" && (inv.hasPhoto || inv.photo) && (
+                  <div className="mt-2 flex items-center gap-3 flex-wrap">
+                    <EvidenceButton photoId={inv.id} inlineSrc={inv.photo || null} label="Ver evidencia" downloadName={`${invoiceFileTag(inv)}.jpg`} />
+                    {inv.location && (
+                      <a href={mapsLink(inv.location)} target="_blank" rel="noreferrer" className="text-xs font-medium underline" style={{ color: "var(--brand)" }}>
+                        Ver ubicación
+                      </a>
+                    )}
+                    <span className="lg-mono text-xs" style={{ color: "var(--muted)" }}>{formatDateTime(inv.updatedAt)}</span>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {showNewInvoice && (
+          <InvoiceFormSheet onCancel={() => setShowNewInvoice(false)} onSave={addInvoice} />
+        )}
+        {editingInvoice && (
+          <InvoiceFormSheet
+            initial={editingInvoice}
+            onCancel={() => setEditingInvoice(null)}
+            onSave={(data) => updateInvoice(editingInvoice.id, data)}
+          />
+        )}
+        {editingRoute && (
+          <NewRouteSheet
+            initial={route}
+            onCancel={() => setEditingRoute(false)}
+            onSave={updateRouteMeta}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="lg-root min-h-screen">
+      <GlobalStyle />
+      <Header title="Panel de despacho" subtitle="Rutas activas" onBack={onExit} dark />
+      <div className="max-w-lg mx-auto px-4 py-5">
+        <div className="flex gap-2.5 mb-5">
+          <button className="lg-btn lg-btn-brand flex-1" onClick={() => setShowNewRoute(true)}>
+            <Plus size={18} /> Nueva ruta
+          </button>
+          <button className="lg-btn lg-btn-ghost flex-1" onClick={() => setShowImport(true)}>
+            <FileSpreadsheet size={18} /> Importar Excel
+          </button>
+        </div>
+
+        <button
+          type="button"
+          className="lg-btn lg-btn-ghost w-full mb-5 text-xs"
+          disabled={rebuilding}
+          onClick={handleRebuildSearchIndex}
+          title="Solo necesario una vez: actualiza el buscador de Ventas, los contadores de progreso y separa las fotos de rutas creadas antes de esta actualización"
+        >
+          {rebuilding ? "Actualizando…" : "Mantenimiento del índice (una sola vez)"}
+        </button>
+
+        <div className="flex flex-col gap-3">
+          {index.length === 0 && <EmptyState text="Aún no has creado ninguna ruta." />}
+          {(() => {
+            const todayRoutes = index.filter((r) => isToday(r.createdAt));
+            const previousRoutes = index.filter((r) => !isToday(r.createdAt));
+            return (
+              <React.Fragment>
+                {todayRoutes.length > 0 && (
+                  <div className="flex flex-col gap-3">
+                    {todayRoutes.map((r) => (
+                      <RouteRow key={r.id} r={r} onClick={() => setSelectedId(r.id)} />
+                    ))}
+                  </div>
+                )}
+                {previousRoutes.length > 0 && (
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      className="lg-btn lg-btn-ghost w-full"
+                      onClick={() => setShowPrevious((v) => !v)}
+                    >
+                      {showPrevious ? "Ocultar" : "Mostrar"} rutas anteriores ({previousRoutes.length})
+                    </button>
+                    {showPrevious && (() => {
+                      const { dayGroups, weekGroups } = groupPreviousRoutes(previousRoutes);
+                      return (
+                        <div className="flex flex-col gap-2.5 mt-3">
+                          {dayGroups.map(([key, group]) => (
+                            <CollapsibleRouteGroup key={key} label={group.label} routes={group.routes} onSelect={setSelectedId} />
+                          ))}
+                          {weekGroups.map(([key, group]) => (
+                            <CollapsibleRouteGroup key={key} label={group.label} routes={group.routes} onSelect={setSelectedId} />
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+              </React.Fragment>
+            );
+          })()}
+        </div>
+      </div>
+
+      {showNewRoute && (
+        <NewRouteSheet onCancel={() => setShowNewRoute(false)} onSave={createRoute} />
+      )}
+      {showImport && (
+        <ImportExcelSheet onCancel={() => setShowImport(false)} onImport={importRoutes} />
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Importar rutas desde Excel                                          */
+/* ------------------------------------------------------------------ */
+
+function ImportExcelSheet({ onCancel, onImport }) {
+  const [step, setStep] = useState("upload"); // upload | preview | error
+  const [parsed, setParsed] = useState(null); // { groups, skipped, totalRows }
+  const [assignments, setAssignments] = useState({}); // code -> { driverName, routeName }
+  const [errorMsg, setErrorMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    setErrorMsg("");
+    try {
+      const result = await parseRoutesExcel(file);
+      if (result.groups.length === 0) {
+        setErrorMsg(
+          `No se encontraron filas con Ruta y Factura/Pedido válidos en el archivo. ` +
+          `Hoja revisada: "${result.sheetName}" (hojas en el archivo: ${result.sheetNames.join(", ") || "ninguna"}). ` +
+          `Columnas detectadas: ${result.headers.join(", ") || "no se detectó ninguna columna"}.`
+        );
+        setStep("error");
+      } else {
+        setParsed(result);
+        const initial = {};
+        result.groups.forEach((g) => {
+          const ztName = ZT_NAMES[g.code];
+          initial[g.code] = { driverName: "", routeName: ztName ? `${g.code} · ${ztName}` : `${g.code} — ${g.locality}` };
+        });
+        setAssignments(initial);
+        setStep("preview");
+      }
+    } catch (err) {
+      setErrorMsg(`No se pudo leer el archivo: ${err?.message || "error desconocido"}. Verifica que sea un .xlsx o .csv válido.`);
+      setStep("error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function updateAssignment(code, field, value) {
+    setAssignments((prev) => ({ ...prev, [code]: { ...prev[code], [field]: value } }));
+  }
+
+  const allAssigned = parsed?.groups.every((g) => assignments[g.code]?.driverName?.trim());
+
+  function confirmImport() {
+    const groupsWithDriver = parsed.groups.map((g) => ({
+      code: g.code,
+      locality: g.locality,
+      invoices: g.invoices,
+      driverName: assignments[g.code].driverName.trim(),
+      routeName: assignments[g.code].routeName.trim() || `${g.code} — ${g.locality}`,
+    }));
+    onImport(groupsWithDriver);
+  }
+
+  return (
+    <div className="lg-scrim" onClick={onCancel}>
+      <div className="lg-sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560 }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold text-lg">Importar rutas desde Excel</h3>
+          <button onClick={onCancel}><X size={20} /></button>
+        </div>
+
+        {step === "upload" && (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm" style={{ color: "var(--muted)" }}>
+              Sube el reporte de despacho (.xlsx o .csv). Se reconocen las columnas
+              <span className="lg-mono"> Ruta</span>, <span className="lg-mono">Ruta Texto</span>,
+              <span className="lg-mono"> Pedido</span>, <span className="lg-mono">Factura</span>,
+              <span className="lg-mono"> Fecha salida mcías.</span>, <span className="lg-mono">Destinatario mcía.</span> y{" "}
+              <span className="lg-mono">Nombre destinatario de mercancías</span>. Cada código de Ruta se
+              agrupa como una ruta nueva; la población (Ruta Texto) se guarda como referencia de cada entrega.
+            </p>
+            <label className="lg-card flex flex-col items-center justify-center gap-2 py-9 cursor-pointer" style={{ borderStyle: "dashed" }}>
+              <Upload size={26} style={{ color: "var(--muted)" }} />
+              <span className="text-sm font-medium">{busy ? "Leyendo archivo…" : "Seleccionar archivo"}</span>
+              <input type="file" accept=".xlsx,.xls,.csv" className="lg-file-input" onChange={handleFile} disabled={busy} />
+            </label>
+          </div>
+        )}
+
+        {step === "error" && (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm rounded-md p-3 flex items-start gap-2" style={{ background: "var(--bad-bg)", color: "var(--bad)" }}>
+              <AlertTriangle size={16} className="mt-0.5 shrink-0" /> {errorMsg}
+            </p>
+            <button className="lg-btn lg-btn-ghost" onClick={() => setStep("upload")}>Intentar de nuevo</button>
+          </div>
+        )}
+
+        {step === "preview" && parsed && (
+          <div className="flex flex-col gap-4">
+            <p className="text-sm" style={{ color: "var(--muted)" }}>
+              Se encontraron <b>{parsed.groups.reduce((a, g) => a + g.invoices.length, 0)}</b> facturas
+              en <b>{parsed.groups.length}</b> rutas
+              {parsed.skipped > 0 && <> · {parsed.skipped} filas se omitieron por no tener Ruta ni Factura/Pedido</>}.
+              Asigna un chofer a cada ruta para poder importarlas.
+            </p>
+
+            <div className="flex flex-col gap-3 max-h-[45vh] overflow-y-auto pr-0.5">
+              {parsed.groups.map((g) => (
+                <div key={g.code} className="lg-card p-3.5">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="lg-mono text-sm font-semibold">{g.code}</span>
+                    <span className="text-xs" style={{ color: "var(--muted)" }}>{g.invoices.length} facturas</span>
+                  </div>
+                  <input
+                    className="lg-input mb-2 text-sm"
+                    value={assignments[g.code]?.routeName || ""}
+                    onChange={(e) => updateAssignment(g.code, "routeName", e.target.value)}
+                    placeholder="Nombre de la ruta"
+                  />
+                  <DriverPicker
+                    value={assignments[g.code]?.driverName || ""}
+                    onChange={(v) => updateAssignment(g.code, "driverName", v)}
+                    placeholder="Chofer (obligatorio)"
+                  />
+                </div>
+              ))}
+            </div>
+
+            <button className="lg-btn lg-btn-brand" disabled={!allAssigned} onClick={confirmImport}>
+              Importar {parsed.groups.length} ruta{parsed.groups.length === 1 ? "" : "s"}
+            </button>
+            <button className="lg-btn lg-btn-ghost" onClick={() => setStep("upload")}>Elegir otro archivo</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RouteRow({ r, onClick }) {
+  // r.total/ok/bad vienen ya calculados desde routes-index (sin fotos),
+  // así que no hace falta descargar la ruta completa solo para mostrar
+  // una barra de progreso.
+  const counts = { total: r.total || 0, ok: r.ok || 0, bad: r.bad || 0 };
+  return (
+    <button onClick={onClick} className="lg-card p-4 text-left w-full">
+      <div className="flex items-center justify-between mb-2">
+        <p className="font-semibold">{r.name}</p>
+        <span className="text-xs flex items-center gap-1" style={{ color: "var(--muted)" }}>
+          <User size={12} /> {r.driverName}
+        </span>
+      </div>
+      <ProgressBar counts={counts} />
+      {r.liquidacionStatus && (
+        <div className="mt-2.5"><LiquidacionPill status={r.liquidacionStatus} /></div>
+      )}
+    </button>
+  );
+}
+
+function Header({ title, subtitle, onBack, dark, right }) {
+  return (
+    <div style={{ background: dark ? "var(--dark)" : "transparent" }} className="px-4 pt-6 pb-5">
+      <div className="max-w-lg mx-auto flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          {onBack && (
+            <button onClick={onBack} className="text-white/90 shrink-0" style={{ marginLeft: -6 }}>
+              <ChevronLeft size={24} />
+            </button>
+          )}
+          <div className="min-w-0">
+            <h1 className="text-white font-semibold text-lg leading-tight truncate">{title}</h1>
+            {subtitle && <p className="text-xs truncate" style={{ color: "#AFD3EC" }}>{subtitle}</p>}
+          </div>
+        </div>
+        {right && <div className="shrink-0">{right}</div>}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ text }) {
+  return (
+    <div className="lg-card p-6 text-center" style={{ color: "var(--muted)" }}>
+      <Package size={26} className="mx-auto mb-2" />
+      <p className="text-sm">{text}</p>
+    </div>
+  );
+}
+
+function NewRouteSheet({ initial, onCancel, onSave }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [driver, setDriver] = useState(initial?.driverName || "");
+  const [dateStr, setDateStr] = useState(
+    initial ? new Date(initial.createdAt).toISOString().slice(0, 10) : ""
+  );
+  return (
+    <div className="lg-scrim" onClick={onCancel}>
+      <div className="lg-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold text-lg">{initial ? "Editar ruta" : "Nueva ruta"}</h3>
+          <button onClick={onCancel}><X size={20} /></button>
+        </div>
+        <div className="flex flex-col gap-3">
+          <div>
+            <label className="text-sm font-medium">Nombre de la ruta</label>
+            <input className="lg-input mt-1" placeholder="Ej. Ruta Norte — Martes" value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-sm font-medium">Asignar a chofer</label>
+            <div className="mt-1"><DriverPicker value={driver} onChange={setDriver} /></div>
+          </div>
+          {initial && (
+            <div>
+              <label className="text-sm font-medium">Fecha de la ruta</label>
+              <input type="date" className="lg-input mt-1" value={dateStr} onChange={(e) => setDateStr(e.target.value)} />
+              <p className="text-xs mt-1" style={{ color: "var(--muted)" }}>
+                Corrígela solo si la ruta quedó en el día equivocado.
+              </p>
+            </div>
+          )}
+          <button
+            className="lg-btn lg-btn-brand mt-2"
+            disabled={!name.trim() || !driver.trim()}
+            onClick={() => onSave(name.trim(), driver.trim(), dateStr || null)}
+          >
+            {initial ? "Guardar cambios" : "Crear ruta"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InvoiceFormSheet({ initial, onCancel, onSave }) {
+  const [factura, setFactura] = useState(initial?.factura || "");
+  const [pedido, setPedido] = useState(initial?.pedido || "");
+  const [cliente, setCliente] = useState(initial?.cliente || "");
+  const [direccion, setDireccion] = useState(initial?.direccion || "");
+  const valid = (factura.trim() || pedido.trim()) && cliente.trim() && direccion.trim();
+  return (
+    <div className="lg-scrim" onClick={onCancel}>
+      <div className="lg-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold text-lg">{initial ? "Editar factura" : "Agregar factura"}</h3>
+          <button onClick={onCancel}><X size={20} /></button>
+        </div>
+        <div className="flex flex-col gap-3">
+          <div>
+            <label className="text-sm font-medium">Factura</label>
+            <input className="lg-input mt-1 lg-mono" placeholder="F-00123" value={factura} onChange={(e) => setFactura(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-sm font-medium">Pedido (si aún no hay factura)</label>
+            <input className="lg-input mt-1 lg-mono" placeholder="52722569" value={pedido} onChange={(e) => setPedido(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-sm font-medium">Cliente</label>
+            <input className="lg-input mt-1" placeholder="Nombre del cliente" value={cliente} onChange={(e) => setCliente(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-sm font-medium">Población</label>
+            <input className="lg-input mt-1" placeholder="Ej. Tepic" value={direccion} onChange={(e) => setDireccion(e.target.value)} />
+          </div>
+          <button
+            className="lg-btn lg-btn-brand mt-2"
+            disabled={!valid}
+            onClick={() => onSave({ factura: factura.trim(), pedido: pedido.trim(), cliente: cliente.trim(), direccion: direccion.trim() })}
+          >
+            {initial ? "Guardar cambios" : "Agregar a la ruta"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Vista Liquidación de ruta                                            */
+/* ------------------------------------------------------------------ */
+
+function LiquidadorView({ name, onExit }) {
+  const [index, setIndex] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [route, setRoute] = useState(null);
+
+  useEffect(() => {
+    const unwatch = window.storage.watch(INDEX_KEY, (raw) => {
+      setIndex(raw ? JSON.parse(raw) : []);
+    });
+    return unwatch;
+  }, []);
+  useEffect(() => {
+    if (!selectedId) { setRoute(null); return; }
+    const unwatch = window.storage.watch(`route:${selectedId}`, (raw) => {
+      setRoute(raw ? JSON.parse(raw) : null);
+    });
+    return unwatch;
+  }, [selectedId]);
+
+  async function saveLiquidacion(status, motivo, attachment, location) {
+    // attachment: null = sin cambios en el archivo adjunto (o ninguno);
+    // {dataUrl,name,type} = archivo nuevo — la foto/documento se guarda
+    // aparte de la ruta, y en route.liquidacion solo queda su nombre/tipo.
+    let attachmentMeta = route.liquidacion?.attachment || null;
+    let legacyPhoto = route.liquidacion?.photo || null; // compat con datos de antes de esta versión
+    if (attachment) {
+      await savePhoto(`liq-${route.id}`, attachment.dataUrl);
+      attachmentMeta = { name: attachment.name, type: attachment.type };
+      legacyPhoto = null; // ya quedó en el formato nuevo (separado de la ruta)
+    }
+    const updated = { ...route, liquidacion: { status, motivo: motivo || "", attachment: attachmentMeta, photo: legacyPhoto, location: location || null, by: name, updatedAt: Date.now() } };
+    await saveRoute(updated);
+    setRoute(updated);
+    await updateIndex((list) => list.map((r) => (r.id === updated.id ? { ...r, liquidacionStatus: status } : r)));
+  }
+
+  if (route) {
+    const fallidas = route.invoices.filter((i) => i.status === "fallido");
+    const conFaltante = route.invoices.filter((i) => i.status === "entregado" && i.faltante);
+    return (
+      <div className="lg-root min-h-screen">
+        <GlobalStyle />
+        <Header title={route.name} subtitle={`Chofer: ${route.driverName}`} onBack={() => setSelectedId(null)} dark />
+        <div className="max-w-lg mx-auto px-4 py-5 flex flex-col gap-4">
+          <div className="lg-card p-4">
+            <ProgressBar invoices={route.invoices} />
+          </div>
+
+          {fallidas.length > 0 && (
+            <div>
+              <h2 className="font-semibold mb-2">Devoluciones ({fallidas.length})</h2>
+              <div className="flex flex-col gap-2.5">
+                {fallidas.map((inv) => (
+                  <div key={inv.id} className="lg-card p-3.5">
+                    <p className="lg-mono text-xs" style={{ color: "var(--muted)" }}>{invoiceLabel(inv)}</p>
+                    <p className="font-semibold">{inv.cliente}</p>
+                    {inv.comment && (
+                      <p className="text-sm mt-1 rounded-md p-2" style={{ background: "var(--bad-bg)", color: "var(--bad)" }}>
+                        {inv.comment}
+                      </p>
+                    )}
+                    {(inv.hasPhoto || inv.photo) ? (
+                      <div className="mt-2 flex items-center gap-3 flex-wrap">
+                        <EvidenceButton photoId={inv.id} inlineSrc={inv.photo || null} label="Ver formato" downloadName={`devolucion_${invoiceFileTag(inv)}.jpg`} />
+                        {inv.location && (
+                          <a href={mapsLink(inv.location)} target="_blank" rel="noreferrer" className="text-xs font-medium underline" style={{ color: "var(--brand)" }}>
+                            Ver ubicación
+                          </a>
+                        )}
+                        <span className="lg-mono text-xs" style={{ color: "var(--muted)" }}>{formatDateTime(inv.updatedAt)}</span>
+                      </div>
+                    ) : (
+                      <p className="text-xs mt-1" style={{ color: "var(--muted)" }}>Sin foto de devolución adjunta.</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {conFaltante.length > 0 && (
+            <div>
+              <h2 className="font-semibold mb-2">Entregas con faltante ({conFaltante.length})</h2>
+              <div className="flex flex-col gap-2.5">
+                {conFaltante.map((inv) => (
+                  <div key={inv.id} className="lg-card p-3.5">
+                    <p className="lg-mono text-xs" style={{ color: "var(--muted)" }}>{invoiceLabel(inv)}</p>
+                    <p className="font-semibold">{inv.cliente}</p>
+                    <p className="text-sm mt-1 rounded-md p-2" style={{ background: "var(--warn-bg)", color: "var(--warn)" }}>
+                      <AlertTriangle size={13} className="inline mr-1 -mt-0.5" />{inv.incidencia || "sin detalle"}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <LiquidacionForm route={route} onSave={saveLiquidacion} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="lg-root min-h-screen">
+      <GlobalStyle />
+      <Header title="Liquidación de rutas" subtitle={`Hola, ${name}`} onBack={onExit} dark />
+      <div className="max-w-lg mx-auto px-4 py-5 flex flex-col gap-3">
+        {index.length === 0 && <EmptyState text="Aún no hay rutas creadas." />}
+        {index.map((r) => (
+          <RouteRow key={r.id} r={r} onClick={() => setSelectedId(r.id)} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function readAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function LiquidacionForm({ route, onSave }) {
+  const [status, setStatus] = useState(route.liquidacion?.status || "pendiente");
+  const [motivo, setMotivo] = useState(route.liquidacion?.motivo || "");
+  // Archivo nuevo elegido en esta sesión (con dataUrl en memoria, aún no
+  // subido). El adjunto ya guardado NO se precarga — solo se conocen su
+  // nombre/tipo (metadatos livianos); el archivo en sí se pide bajo
+  // demanda con EvidenceButton, para no bajarlo solo por abrir la ruta.
+  const [attachment, setAttachment] = useState(null);
+  const existingMeta = route.liquidacion?.attachment || null;
+  const legacyInlinePhoto = route.liquidacion?.photo || null; // datos de antes de esta versión
+  const [location, setLocation] = useState(route.liquidacion?.location || null);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 8 * 1024 * 1024) {
+      window.alert("El archivo pesa más de 8 MB. Usa uno más ligero (por ejemplo, comprime el PDF o toma la foto con menor calidad).");
+      return;
+    }
+    setBusy(true);
+    try {
+      const isImage = file.type.startsWith("image/");
+      const [dataUrl, loc] = await Promise.all([
+        isImage ? compressImage(file) : readAsDataURL(file),
+        getLocation(),
+      ]);
+      setAttachment({ dataUrl, name: file.name, type: file.type || "application/octet-stream" });
+      setLocation(loc);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function save() {
+    setBusy(true);
+    try {
+      await onSave(status, motivo, attachment, location);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const isImageAttachment = attachment?.type?.startsWith("image/");
+  const hasAnyAttachment = !!(attachment || existingMeta || legacyInlinePhoto);
+
+  return (
+    <div className="lg-card p-4 flex flex-col gap-3">
+      <h2 className="font-semibold">Estatus de liquidación</h2>
+      <div className="flex gap-2">
+        <button type="button" className={`lg-btn flex-1 ${status === "pendiente" ? "lg-btn-dark" : "lg-btn-ghost"}`} onClick={() => setStatus("pendiente")}>
+          Pendiente
+        </button>
+        <button type="button" className={`lg-btn flex-1 ${status === "liquidado" ? "lg-btn-ok" : "lg-btn-ghost"}`} onClick={() => setStatus("liquidado")}>
+          Liquidado
+        </button>
+      </div>
+      <div>
+        <label className="text-sm font-medium">Motivo / notas (opcional)</label>
+        <textarea className="lg-input mt-1" rows={3} value={motivo} onChange={(e) => setMotivo(e.target.value)}
+          placeholder="Ej. faltó una devolución por firmar…" />
+      </div>
+      <div>
+        <label className="text-sm font-medium block mb-1">Archivo adjunto (opcional) — foto, PDF u otro documento</label>
+        {attachment ? (
+          isImageAttachment ? (
+            <img src={attachment.dataUrl} alt="evidencia liquidación" className="rounded-lg w-full max-h-48 object-cover" />
+          ) : (
+            <div className="lg-card p-3 flex items-center gap-3">
+              <FileIcon size={22} style={{ color: "var(--muted)" }} />
+              <div className="min-w-0">
+                <p className="text-sm font-medium truncate">{attachment.name}</p>
+                <p className="text-xs" style={{ color: "var(--muted)" }}>{attachment.type}</p>
+              </div>
+            </div>
+          )
+        ) : legacyInlinePhoto ? (
+          <img src={legacyInlinePhoto} alt="evidencia liquidación" className="rounded-lg w-full max-h-48 object-cover" />
+        ) : existingMeta ? (
+          <div className="lg-card p-3 flex items-center gap-3">
+            <FileIcon size={22} style={{ color: "var(--muted)" }} />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium truncate">{existingMeta.name}</p>
+              <p className="text-xs" style={{ color: "var(--muted)" }}>{existingMeta.type}</p>
+            </div>
+            <EvidenceButton photoId={`liq-${route.id}`} mimeType={existingMeta.type} label="Ver" downloadName={existingMeta.name} />
+          </div>
+        ) : (
+          <label className="lg-card flex flex-col items-center justify-center gap-2 py-6 cursor-pointer" style={{ borderStyle: "dashed" }}>
+            <Upload size={22} style={{ color: "var(--muted)" }} />
+            <span className="text-sm font-medium">Subir foto, PDF u otro archivo</span>
+            <input type="file" className="lg-file-input" onChange={handleFile} />
+          </label>
+        )}
+        {hasAnyAttachment && (
+          <label className="text-sm font-medium underline cursor-pointer mt-1 inline-block" style={{ color: "var(--brand)" }}>
+            Cambiar archivo
+            <input type="file" className="lg-file-input" onChange={handleFile} />
+          </label>
+        )}
+        {attachment && (
+          <p className="text-xs mt-1" style={{ color: "var(--muted)" }}>
+            {location ? "📍 Ubicación capturada junto con el archivo." : "Sin ubicación disponible para este archivo."}
+          </p>
+        )}
+      </div>
+      <button className="lg-btn lg-btn-brand" disabled={busy} onClick={save}>
+        {busy ? "Guardando…" : saved ? "Guardado ✓" : "Guardar estatus"}
+      </button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Vista Chofer                                                         */
+/* ------------------------------------------------------------------ */
+
+function DriverView({ driverName, onExit }) {
+  const [index, setIndex] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [route, setRoute] = useState(null);
+  const [activeInvoice, setActiveInvoice] = useState(null); // {invoice, action}
+  const [showPrevious, setShowPrevious] = useState(false);
+
+  const myRoutes = index.filter(
+    (r) => r.driverName.trim().toLowerCase() === driverName.trim().toLowerCase()
+  );
+  const myTodayRoutes = myRoutes.filter((r) => isToday(r.createdAt));
+
+  useEffect(() => {
+    const unwatch = window.storage.watch(INDEX_KEY, (raw) => {
+      setIndex(raw ? JSON.parse(raw) : []);
+    });
+    return unwatch;
+  }, []);
+  useEffect(() => {
+    if (!selectedId) return;
+    const unwatch = window.storage.watch(`route:${selectedId}`, (raw) => {
+      setRoute(raw ? JSON.parse(raw) : null);
+    });
+    return unwatch;
+  }, [selectedId]);
+
+  async function submitStatus(invoiceId, status, extra) {
+    // La foto NUNCA va dentro del objeto de la ruta: si viviera ahí,
+    // cada cambio de estatus de CUALQUIER factura obligaría a todos los
+    // que tienen esa ruta abierta a re-descargar TODAS sus fotos (RTDB
+    // sincroniza el nodo completo ante cualquier cambio de un hijo). Se
+    // sube aparte, y en la factura solo queda un booleano.
+    const { photo, ...rest } = extra;
+    if (photo) await savePhoto(invoiceId, photo);
+    const updated = {
+      ...route,
+      invoices: route.invoices.map((inv) =>
+        inv.id === invoiceId ? { ...inv, status, ...rest, hasPhoto: !!photo, updatedAt: Date.now() } : inv
+      ),
+    };
+    await saveRoute(updated);
+    setRoute(updated);
+    await syncSearchIndex(updated);
+    await updateIndex((list) => applyRouteCountsToIndex(list, route.id, updated.invoices));
+    setActiveInvoice(null);
+  }
+
+  if (route) {
+    return (
+      <div className="lg-root min-h-screen">
+        <GlobalStyle />
+        <Header title={route.name} subtitle={`${route.invoices.length} entregas`} onBack={() => (myRoutes.length > 1 ? setSelectedId(null) : onExit())} dark />
+        <div className="max-w-lg mx-auto px-4 py-5">
+          <div className="lg-card p-4 mb-5">
+            <ProgressBar invoices={route.invoices} />
+          </div>
+
+          <div className="flex flex-col gap-3">
+            {route.invoices.length === 0 && <EmptyState text="Despacho aún no agrega facturas a tu ruta." />}
+            {route.invoices.map((inv) => (
+              <button
+                key={inv.id}
+                onClick={() => setActiveInvoice(inv)}
+                className="lg-card p-4 text-left w-full active:scale-[0.99] transition-transform"
+                style={{ borderLeft: `6px solid ${STATUS[inv.status].fg === "var(--muted)" ? "var(--line)" : STATUS[inv.status].fg}` }}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="lg-mono text-xs" style={{ color: "var(--muted)" }}>{invoiceLabel(inv)}</p>
+                    <p className="font-semibold text-base truncate">{inv.cliente}</p>
+                    <p className="text-sm truncate" style={{ color: "var(--muted)" }}>
+                      <MapPin size={12} className="inline mr-1 -mt-0.5" />{inv.direccion}
+                    </p>
+                  </div>
+                  <StatusPill status={inv.status} />
+                </div>
+                {inv.status === "entregado" && inv.faltante && (
+                  <p className="text-xs mt-2 rounded-md p-1.5" style={{ background: "var(--warn-bg)", color: "var(--warn)" }}>
+                    <AlertTriangle size={12} className="inline mr-1 -mt-0.5" />Reportaste faltante
+                  </p>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {activeInvoice && (
+          <InvoiceActionSheet
+            invoice={activeInvoice}
+            onCancel={() => setActiveInvoice(null)}
+            onConfirm={submitStatus}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="lg-root min-h-screen">
+      <GlobalStyle />
+      <Header title={`Hola, ${driverName}`} subtitle="Tus rutas de hoy" onBack={onExit} dark />
+      <div className="max-w-lg mx-auto px-4 py-5 flex flex-col gap-3">
+        {myRoutes.length === 0 && <EmptyState text="Todavía no tienes rutas asignadas. Pide a despacho que te asigne una." />}
+        {myTodayRoutes.map((r) => (
+          <button key={r.id} onClick={() => setSelectedId(r.id)} className="lg-card p-4 text-left w-full flex items-center gap-3">
+            <div className="w-11 h-11 rounded-full flex items-center justify-center shrink-0" style={{ background: "var(--brand-light)" }}>
+              <Truck size={20} color="var(--dark)" />
+            </div>
+            <div className="min-w-0">
+              <p className="font-semibold truncate">{r.name}</p>
+              <p className="text-xs" style={{ color: "var(--muted)" }}>Toca para ver tus entregas</p>
+            </div>
+          </button>
+        ))}
+        {(() => {
+          const previousRoutes = myRoutes.filter((r) => !isToday(r.createdAt));
+          if (previousRoutes.length === 0) return null;
+          return (
+            <div className="mt-1">
+              <button type="button" className="lg-btn lg-btn-ghost w-full" onClick={() => setShowPrevious((v) => !v)}>
+                {showPrevious ? "Ocultar" : "Mostrar"} rutas anteriores ({previousRoutes.length})
+              </button>
+              {showPrevious && (
+                <div className="flex flex-col gap-3 mt-3">
+                  {previousRoutes.map((r) => (
+                    <button key={r.id} onClick={() => setSelectedId(r.id)} className="lg-card p-4 text-left w-full flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-full flex items-center justify-center shrink-0" style={{ background: "var(--brand-light)" }}>
+                        <Truck size={20} color="var(--dark)" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-semibold truncate">{r.name}</p>
+                        <p className="text-xs" style={{ color: "var(--muted)" }}>Toca para ver tus entregas</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </div>
+    </div>
+  );
+}
+
+function InvoiceActionSheet({ invoice, onCancel, onConfirm }) {
+  const [mode, setMode] = useState(null); // 'entregado' | 'fallido'
+  const [photo, setPhoto] = useState(invoice.photo || null); // invoice.photo: dato legado (rutas viejas)
+  const [loadingPhoto, setLoadingPhoto] = useState(false);
+  const [location, setLocation] = useState(invoice.location || null);
+  const [comment, setComment] = useState(invoice.comment || "");
+  const [faltante, setFaltante] = useState(invoice.faltante || false);
+  const [incidencia, setIncidencia] = useState(invoice.incidencia || "");
+  const [busy, setBusy] = useState(false);
+
+  // Si el chofer vuelve a tocar una factura que ya tenía foto (para
+  // corregir algo), esta se pide en ese momento — nunca viene ya
+  // incluida en la factura, así que no se descarga hasta que hace falta.
+  useEffect(() => {
+    if (invoice.hasPhoto && !invoice.photo) {
+      setLoadingPhoto(true);
+      fetchPhoto(invoice.id)
+        .then((v) => setPhoto(v))
+        .finally(() => setLoadingPhoto(false));
+    }
+  }, [invoice.id]);
+
+  async function handlePhoto(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    try {
+      const [img, loc] = await Promise.all([compressImage(file), getLocation()]);
+      setPhoto(img);
+      setLocation(loc);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="lg-scrim" onClick={onCancel}>
+      <div className="lg-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-semibold text-lg">{invoiceLabel(invoice)} · {invoice.cliente}</h3>
+          <button onClick={onCancel}><X size={20} /></button>
+        </div>
+        <p className="text-sm mb-4" style={{ color: "var(--muted)" }}>{invoice.direccion}</p>
+
+        {!mode && (
+          <div className="flex flex-col gap-2.5">
+            <button className="lg-btn lg-btn-ok !py-4 text-base" onClick={() => setMode("entregado")}>
+              <CheckCircle2 size={20} /> Marcar como entregado
+            </button>
+            <button className="lg-btn lg-btn-bad !py-4 text-base" onClick={() => setMode("fallido")}>
+              <XCircle size={20} /> No se pudo entregar
+            </button>
+            <button className="lg-btn lg-btn-ghost" onClick={onCancel}>Cancelar</button>
+          </div>
+        )}
+
+        {mode === "entregado" && (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm rounded-md p-2.5 flex items-start gap-2" style={{ background: "var(--ok-bg)", color: "var(--ok)" }}>
+              <ShieldCheck size={16} className="mt-0.5 shrink-0" />
+              Para cerrar la entrega, sube una foto de la factura firmada.
+            </p>
+            {photo ? (
+              <img src={photo} alt="evidencia" className="rounded-lg w-full max-h-56 object-cover" />
+            ) : loadingPhoto ? (
+              <div className="lg-card flex items-center justify-center py-8 text-sm" style={{ color: "var(--muted)" }}>Cargando foto guardada…</div>
+            ) : (
+              <label className="lg-card flex flex-col items-center justify-center gap-2 py-8 cursor-pointer" style={{ borderStyle: "dashed" }}>
+                <Camera size={26} style={{ color: "var(--muted)" }} />
+                <span className="text-sm font-medium">Tomar / subir foto</span>
+                <input type="file" accept="image/*" capture="environment" className="lg-file-input" onChange={handlePhoto} />
+              </label>
+            )}
+            {photo && (
+              <label className="text-sm font-medium underline text-center cursor-pointer" style={{ color: "var(--brand)" }}>
+                Cambiar foto
+                <input type="file" accept="image/*" capture="environment" className="lg-file-input" onChange={handlePhoto} />
+              </label>
+            )}
+            {photo && (
+              <p className="text-xs text-center" style={{ color: "var(--muted)" }}>
+                {location ? "📍 Ubicación capturada junto con la foto." : "Sin ubicación disponible para esta foto."}
+              </p>
+            )}
+            <div>
+              <label className="text-sm font-medium block mb-1">¿Hubo faltantes en esta entrega?</label>
+              <div className="flex gap-2">
+                <button type="button" className={`lg-btn flex-1 ${!faltante ? "lg-btn-dark" : "lg-btn-ghost"}`} onClick={() => setFaltante(false)}>
+                  No
+                </button>
+                <button type="button" className={`lg-btn flex-1 ${faltante ? "lg-btn-dark" : "lg-btn-ghost"}`} onClick={() => setFaltante(true)}>
+                  Sí
+                </button>
+              </div>
+            </div>
+            {faltante && (
+              <textarea
+                className="lg-input"
+                rows={3}
+                placeholder="Describe qué faltó…"
+                value={incidencia}
+                onChange={(e) => setIncidencia(e.target.value)}
+              />
+            )}
+            <button
+              className="lg-btn lg-btn-ok mt-1"
+              disabled={!photo || busy || (faltante && !incidencia.trim())}
+              onClick={() => onConfirm(invoice.id, "entregado", { photo, comment: null, location, faltante, incidencia: faltante ? incidencia.trim() : "" })}
+            >
+              {busy ? "Procesando foto…" : "Confirmar entrega"}
+            </button>
+            <button className="lg-btn lg-btn-ghost" onClick={() => setMode(null)}>Regresar</button>
+          </div>
+        )}
+
+        {mode === "fallido" && (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm rounded-md p-2.5 flex items-start gap-2" style={{ background: "var(--bad-bg)", color: "var(--bad)" }}>
+              <MessageSquare size={16} className="mt-0.5 shrink-0" />
+              Explica el motivo para poder cerrar esta entrega. La foto del formato de devolución es opcional.
+            </p>
+            <textarea
+              className="lg-input"
+              rows={4}
+              placeholder="Ej. Local cerrado, no había quien recibiera…"
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+            />
+            {photo ? (
+              <img src={photo} alt="formato de devolución" className="rounded-lg w-full max-h-48 object-cover" />
+            ) : loadingPhoto ? (
+              <div className="lg-card flex items-center justify-center py-6 text-sm" style={{ color: "var(--muted)" }}>Cargando foto guardada…</div>
+            ) : (
+              <label className="lg-card flex flex-col items-center justify-center gap-2 py-6 cursor-pointer" style={{ borderStyle: "dashed" }}>
+                <Camera size={22} style={{ color: "var(--muted)" }} />
+                <span className="text-sm font-medium">Foto del formato de devolución (opcional)</span>
+                <input type="file" accept="image/*" capture="environment" className="lg-file-input" onChange={handlePhoto} />
+              </label>
+            )}
+            {photo && (
+              <label className="text-sm font-medium underline text-center cursor-pointer" style={{ color: "var(--brand)" }}>
+                Cambiar foto
+                <input type="file" accept="image/*" capture="environment" className="lg-file-input" onChange={handlePhoto} />
+              </label>
+            )}
+            {photo && (
+              <p className="text-xs text-center" style={{ color: "var(--muted)" }}>
+                {location ? "📍 Ubicación capturada junto con la foto." : "Sin ubicación disponible para esta foto."}
+              </p>
+            )}
+            <button
+              className="lg-btn lg-btn-bad mt-1"
+              disabled={!comment.trim() || busy}
+              onClick={() => onConfirm(invoice.id, "fallido", { comment: comment.trim(), photo: photo || null, location })}
+            >
+              {busy ? "Procesando foto…" : "Confirmar no entrega"}
+            </button>
+            <button className="lg-btn lg-btn-ghost" onClick={() => setMode(null)}>Regresar</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Vista Representantes de venta (solo consulta, con archivo semanal)  */
+/* ------------------------------------------------------------------ */
+
+/* Compara la fecha de creación de una ruta contra el día de hoy, para
+   separar "Rutas de hoy" de "Rutas anteriores" en cada vista. */
+function isToday(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+}
+
+/* Lunes de la semana de una fecha dada (semana laboral lunes–viernes,
+   igual que el rol semanal de rutas). */
+function startOfWeekMonday(ts) {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  const day = d.getDay(); // 0=domingo … 6=sábado
+  d.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+  return d;
+}
+function dateKey(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function dayLabel(ts) {
+  const s = new Date(ts).toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" });
+  return `Ruta ${s}`;
+}
+function weekRangeLabel(ts) {
+  const monday = startOfWeekMonday(ts);
+  const friday = new Date(monday);
+  friday.setDate(friday.getDate() + 4);
+  const monthShort = (x) => x.toLocaleDateString("es-MX", { month: "short" }).replace(".", "");
+  if (monday.getMonth() === friday.getMonth()) {
+    return `Sem. del ${monday.getDate()} al ${friday.getDate()} ${monthShort(friday)}`;
+  }
+  return `Sem. del ${monday.getDate()} ${monthShort(monday)} al ${friday.getDate()} ${monthShort(friday)}`;
+}
+
+/* Encabezado plegable con un cuadrito de color, usado para agrupar
+   rutas anteriores por día (semana en curso) o por semana (semanas ya
+   cerradas) en la vista de Representantes de venta. */
+function CollapsibleRouteGroup({ label, routes, onSelect }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button type="button" className="lg-card p-3.5 w-full flex items-center gap-2.5 text-left" onClick={() => setOpen((v) => !v)}>
+        <span className="inline-block rounded-sm shrink-0" style={{ width: 10, height: 10, background: "var(--brand)" }} />
+        <span className="font-medium flex-1 truncate">{label}</span>
+        <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>{routes.length}</span>
+        <ChevronLeft size={16} style={{ color: "var(--muted)", transform: open ? "rotate(90deg)" : "rotate(-90deg)" }} />
+      </button>
+      {open && (
+        <div className="flex flex-col gap-3 mt-2.5 pl-1">
+          {routes.map((r) => (
+            <RouteRow key={r.id} r={r} onClick={() => onSelect(r.id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Agrupa rutas que no son de hoy: las de esta semana por día, y las de
+   semanas ya cerradas por semana completa. Compartido por Despacho y
+   Representantes de venta para que se vean igual en ambos lados. */
+function groupPreviousRoutes(previousRoutes) {
+  const thisWeekMonday = startOfWeekMonday(new Date()).getTime();
+  const thisWeekPrevious = previousRoutes.filter((r) => r.createdAt >= thisWeekMonday);
+  const olderRoutes = previousRoutes.filter((r) => r.createdAt < thisWeekMonday);
+
+  const byDay = {};
+  thisWeekPrevious.forEach((r) => {
+    const key = dateKey(r.createdAt);
+    if (!byDay[key]) byDay[key] = { label: dayLabel(r.createdAt), routes: [] };
+    byDay[key].routes.push(r);
+  });
+  const dayGroups = Object.entries(byDay).sort((a, b) => (a[0] < b[0] ? 1 : -1));
+
+  const byWeek = {};
+  olderRoutes.forEach((r) => {
+    const wk = startOfWeekMonday(r.createdAt).getTime();
+    if (!byWeek[wk]) byWeek[wk] = { label: weekRangeLabel(r.createdAt), routes: [] };
+    byWeek[wk].routes.push(r);
+  });
+  const weekGroups = Object.entries(byWeek).sort((a, b) => Number(b[0]) - Number(a[0]));
+
+  return { dayGroups, weekGroups };
+}
+
+function RouteReadOnlyDetail({ route, onBack }) {
+  return (
+    <div className="lg-root min-h-screen">
+      <GlobalStyle />
+      <Header title={route.name} subtitle={`Chofer: ${route.driverName}`} onBack={onBack} dark />
+      <div className="max-w-lg mx-auto px-4 py-5">
+        <div className="lg-card p-4 mb-5">
+          <ProgressBar invoices={route.invoices} />
+        </div>
+        <div className="flex flex-col gap-2.5">
+          {route.invoices.map((inv) => (
+            <InvoiceSearchResultCard key={inv.id} inv={inv} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImageLightbox({ src, downloadName, onClose }) {
+  return (
+    <div className="lg-scrim" onClick={onClose} style={{ padding: 16 }}>
+      <div className="flex flex-col items-center gap-2" onClick={(e) => e.stopPropagation()}>
+        <img src={src} alt="vista previa" style={{ maxWidth: "100%", maxHeight: "82vh", borderRadius: 12 }} />
+        <div className="flex items-center gap-4">
+          {downloadName && (
+            <a href={src} download={downloadName} className="text-sm font-medium underline" style={{ color: "#fff" }}>
+              Descargar
+            </a>
+          )}
+          <button onClick={onClose} className="text-sm font-medium underline" style={{ color: "#fff" }}>Cerrar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Botón de carga bajo demanda: no descarga la foto/adjunto hasta que el
+   usuario lo pide. photoId es la clave en logistica-fotos/{photoId}.
+   inlineSrc es solo para compatibilidad con datos de rutas viejas que
+   todavía traen la foto embebida (ahí no hace falta pedirla, ya está).
+   mimeType decide si se abre en un lightbox (imagen) o se descarga
+   directo (PDF u otro archivo). */
+function EvidenceButton({ photoId, inlineSrc, mimeType, label = "Ver evidencia", downloadName }) {
+  const [state, setState] = useState("idle"); // idle | loading | open | error
+  const [src, setSrc] = useState(inlineSrc || null);
+  const isImage = !mimeType || mimeType.startsWith("image/");
+
+  async function open() {
+    if (src) {
+      if (isImage) setState("open");
+      else triggerDownload(src);
+      return;
+    }
+    setState("loading");
+    try {
+      const val = await fetchPhoto(photoId);
+      if (!val) { setState("error"); return; }
+      setSrc(val);
+      if (isImage) setState("open");
+      else { triggerDownload(val); setState("idle"); }
+    } catch (err) {
+      setState("error");
+    }
+  }
+  function triggerDownload(dataUrl) {
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = downloadName || "archivo";
+    a.click();
+  }
+
+  return (
+    <>
+      <button type="button" className="text-xs font-medium underline" style={{ color: "var(--brand)" }} onClick={open} disabled={state === "loading"}>
+        {state === "loading" ? "Cargando…" : label}
+      </button>
+      {state === "error" && <span className="text-xs" style={{ color: "var(--bad)" }}>No se pudo cargar.</span>}
+      {state === "open" && src && <ImageLightbox src={src} downloadName={downloadName} onClose={() => setState("idle")} />}
+    </>
+  );
+}
+
+function InvoiceSearchResultCard({ inv }) {
+  return (
+    <div className="lg-card p-3.5">
+      {(inv.routeName || inv.driverName) && (
+        <p className="text-xs" style={{ color: "var(--muted)" }}>{inv.routeName} · {inv.driverName}</p>
+      )}
+      <div className="flex items-start justify-between gap-2 mt-1">
+        <div className="min-w-0">
+          <p className="lg-mono text-xs" style={{ color: "var(--muted)" }}>{invoiceLabel(inv)}</p>
+          <p className="font-semibold truncate">{inv.cliente}</p>
+          <p className="text-sm truncate" style={{ color: "var(--muted)" }}>
+            <MapPin size={12} className="inline mr-1 -mt-0.5" />{inv.direccion}
+          </p>
+          {inv.destino && <p className="lg-mono text-xs mt-0.5" style={{ color: "var(--muted)" }}>Cód. {inv.destino}</p>}
+        </div>
+        <StatusPill status={inv.status} />
+      </div>
+      {inv.comment && (
+        <p className="text-sm mt-2 rounded-md p-2" style={{ background: "var(--bad-bg)", color: "var(--bad)" }}>{inv.comment}</p>
+      )}
+      {inv.status === "entregado" && inv.faltante && (
+        <p className="text-sm mt-2 rounded-md p-2" style={{ background: "var(--warn-bg)", color: "var(--warn)" }}>
+          <AlertTriangle size={13} className="inline mr-1 -mt-0.5" />Faltante: {inv.incidencia || "sin detalle"}
+        </p>
+      )}
+      {(inv.hasPhoto || inv.photo) && (
+        <div className="mt-2 flex items-center gap-3 flex-wrap">
+          <EvidenceButton
+            photoId={inv.id}
+            inlineSrc={inv.photo || null}
+            label={inv.status === "fallido" ? "Ver formato de devolución" : "Ver evidencia"}
+            downloadName={`${invoiceFileTag(inv)}.jpg`}
+          />
+          {inv.location && (
+            <a href={mapsLink(inv.location)} target="_blank" rel="noreferrer" className="text-xs font-medium underline" style={{ color: "var(--brand)" }}>
+              Ver ubicación
+            </a>
+          )}
+          <span className="lg-mono text-xs" style={{ color: "var(--muted)" }}>{formatDateTime(inv.updatedAt)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VentasView({ onExit }) {
+  const [index, setIndex] = useState([]);
+  const [searchEntries, setSearchEntries] = useState([]); // índice ligero de facturas, sin fotos
+  const [selectedId, setSelectedId] = useState(null);
+  const [route, setRoute] = useState(null);
+  const [search, setSearch] = useState("");
+  const [showPrevious, setShowPrevious] = useState(false);
+
+  useEffect(() => {
+    const unwatch = window.storage.watch(INDEX_KEY, (raw) => {
+      setIndex(raw ? JSON.parse(raw) : []);
+    });
+    return unwatch;
+  }, []);
+  // El índice de búsqueda guarda solo texto (factura, pedido, cliente…),
+  // nunca fotos, así que escucharlo completo en tiempo real es barato:
+  // no baja más que unos cuantos KB, sin importar cuántas rutas existan.
+  useEffect(() => {
+    const unwatch = window.storage.watch(SEARCH_INDEX_KEY, (raw) => {
+      setSearchEntries(raw ? Object.values(raw) : []);
+    });
+    return unwatch;
+  }, []);
+  // La ruta completa (con fotos) solo se descarga cuando el usuario
+  // realmente la abre, nunca por adelantado.
+  useEffect(() => {
+    if (!selectedId) { setRoute(null); return; }
+    const unwatch = window.storage.watch(`route:${selectedId}`, (raw) => {
+      setRoute(raw ? JSON.parse(raw) : null);
+    });
+    return unwatch;
+  }, [selectedId]);
+
+  if (route) {
+    return <RouteReadOnlyDetail route={route} onBack={() => setSelectedId(null)} />;
+  }
+
+  const query = search.trim().toLowerCase();
+  let searchResults = null;
+  if (query) {
+    searchResults = searchEntries.filter((inv) => {
+      const hay = [inv.factura, inv.pedido, inv.destino, inv.cliente].filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(query);
+    });
+  }
+
+  const todayRoutes = index.filter((r) => isToday(r.createdAt));
+  const previousRoutes = index.filter((r) => !isToday(r.createdAt));
+  const { dayGroups, weekGroups } = groupPreviousRoutes(previousRoutes);
+
+  return (
+    <div className="lg-root min-h-screen">
+      <GlobalStyle />
+      <Header title="Representantes de venta" subtitle="Consulta de rutas y entregas" onBack={onExit} dark />
+      <div className="max-w-lg mx-auto px-4 py-5 flex flex-col gap-6">
+        <input
+          className="lg-input"
+          placeholder="Buscar por factura, pedido, cliente o código de cliente…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+
+        {searchResults ? (
+          <div>
+            <h2 className="font-semibold mb-2">
+              {searchResults.length} resultado{searchResults.length === 1 ? "" : "s"}
+            </h2>
+            <div className="flex flex-col gap-3">
+              {searchResults.length === 0 && <EmptyState text="No se encontró ninguna factura con ese dato." />}
+              {searchResults.map((inv) => (
+                <div key={inv.id} className="cursor-pointer" onClick={() => setSelectedId(inv.routeId)}>
+                  <InvoiceSearchResultCard inv={inv} />
+                  <p className="text-xs text-right mt-1 mr-1" style={{ color: "var(--brand)" }}>Ver ruta completa y foto →</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div>
+            <h2 className="font-semibold mb-2">Rutas de hoy</h2>
+            <div className="flex flex-col gap-3">
+              {todayRoutes.length === 0 && <EmptyState text="Sin rutas hoy todavía." />}
+              {todayRoutes.map((r) => (
+                <RouteRow key={r.id} r={r} onClick={() => setSelectedId(r.id)} />
+              ))}
+            </div>
+
+            {previousRoutes.length > 0 && (
+              <div className="mt-3">
+                <button type="button" className="lg-btn lg-btn-ghost w-full" onClick={() => setShowPrevious((v) => !v)}>
+                  {showPrevious ? "Ocultar" : "Mostrar"} rutas anteriores ({previousRoutes.length})
+                </button>
+                {showPrevious && (
+                  <div className="flex flex-col gap-2.5 mt-3">
+                    {dayGroups.map(([key, group]) => (
+                      <CollapsibleRouteGroup key={key} label={group.label} routes={group.routes} onSelect={setSelectedId} />
+                    ))}
+                    {weekGroups.map(([key, group]) => (
+                      <CollapsibleRouteGroup key={key} label={group.label} routes={group.routes} onSelect={setSelectedId} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Raíz de la app                                                       */
+/* ------------------------------------------------------------------ */
+
+function LogisticaApp() {
+  const [session, setSession] = useState(null); // { role, name }
+
+  if (!session) {
+    return <RoleGate onEnter={(role, name) => setSession({ role, name })} />;
+  }
+  if (session.role === "admin") {
+    return <AdminView onExit={() => setSession(null)} />;
+  }
+  if (session.role === "liquidador") {
+    return <LiquidadorView name={session.name} onExit={() => setSession(null)} />;
+  }
+  if (session.role === "ventas") {
+    return <VentasView onExit={() => setSession(null)} />;
+  }
+  return <DriverView driverName={session.name} onExit={() => setSession(null)} />;
+}
+
+
+ReactDOM.render(<LogisticaApp />, document.getElementById("root"));
+</script>
+
+<!-- PWA: registra el Service Worker (necesario para poder instalar la app) -->
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("sw.js").catch((err) => {
+        console.error("No se pudo registrar el Service Worker:", err);
+      });
+    });
+  }
+</script>
+</body>
+</html>
