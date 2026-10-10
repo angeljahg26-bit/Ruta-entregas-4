@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="es">
+<head>
+<script>
+  /* Si la URL no trae el parámetro "v", redirige a sí misma agregando
+     un valor único (la hora actual). Esto obliga al navegador y al
+     servidor de GitHub Pages a entregar siempre la versión más
+     reciente del archivo, sin que el usuario tenga que hacer nada. */
+  if (!location.search.includes("v=")) {
+    location.replace(location.pathname + "?v=" + Date.now());
+  }
+</script>
+<script>
+  /* Si algo falla al cargar la app, muestra el error en pantalla
+     (en vez de dejar la pantalla en blanco) para poder diagnosticarlo. */
+  window.addEventListener("error", function (e) {
+    function show() {
+      const box = document.createElement("pre");
+      box.style.cssText = "white-space:pre-wrap;padding:16px;color:#b00020;font-size:14px;font-family:monospace;background:#fff3f3;margin:0;";
+      box.textContent = "Error al cargar la app:\n\n" + (e.message || e) + "\n\nArchivo: " + (e.filename || "?") + "\nLínea: " + (e.lineno || "?");
+      document.body.prepend(box);
+    }
+    if (document.body) show();
+    else document.addEventListener("DOMContentLoaded", show);
+  }, true);
+  window.addEventListener("unhandledrejection", function (e) {
+    function show() {
+      const box = document.createElement("pre");
+      box.style.cssText = "white-space:pre-wrap;padding:16px;color:#b00020;font-size:14px;font-family:monospace;background:#fff3f3;margin:0;";
+      const err = e.reason;
+      box.textContent = "Error al guardar/leer datos (Firebase):\n\n" + (err && err.message ? err.message : String(err)) + (err && err.code ? "\n\nCódigo: " + err.code : "");
+      document.body.prepend(box);
+    }
+    if (document.body) show();
+    else document.addEventListener("DOMContentLoaded", show);
+  });
+</script>
+<style>
+  /* Pantalla de carga mientras bajan React/Firebase/etc. No depende de
+     nada externo (ni Tailwind, ni React) — es CSS puro, para que
+     funcione incluso si una de esas librerías se traba con mala señal. */
+  #boot-loading {
+    position: fixed; inset: 0; z-index: 9999;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; background: #0B3D63; color: #fff;
+    font-family: system-ui, -apple-system, sans-serif; text-align: center; padding: 24px; box-sizing: border-box;
+  }
+  #boot-loading .boot-spin {
+    width: 36px; height: 36px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.25); border-top-color: #fff;
+    animation: boot-spin 0.8s linear infinite;
+  }
+  @keyframes boot-spin { to { transform: rotate(360deg); } }
+  #boot-loading p { color: #CFE6F7; font-size: 14px; line-height: 1.5; margin: 0; max-width: 300px; }
+  #boot-retry { display: none; flex-direction: column; align-items: center; gap: 12px; }
+  #boot-loading button {
+    padding: 12px 22px; border: none; border-radius: 10px; background: #2F86D9; color: #fff; font-weight: 600; font-size: 15px;
+  }
+</style>
+<meta charset="UTF-8" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>MEDICOM · Rutas y Entregas</title>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" onerror="(window.__failed=(window.__failed||[])).push('unpkg.com')"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" onerror="(window.__failed=(window.__failed||[])).push('unpkg.com')"></script>
+
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js" onerror="(window.__failed=(window.__failed||[])).push('unpkg.com')"></script>
+<script src="https://cdn.tailwindcss.com/3.4.4" onerror="(window.__failed=(window.__failed||[])).push('cdn.tailwindcss.com')"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" onerror="(window.__failed=(window.__failed||[])).push('www.gstatic.com')"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js" onerror="(window.__failed=(window.__failed||[])).push('www.gstatic.com')"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<div id="boot-loading">
+  <div class="boot-spin"></div>
+  <p>Cargando MEDICOM…</p>
+  <div id="boot-retry">
+    <p>Esto está tardando más de lo normal. Puede ser tu señal — revisa tu conexión e intenta de nuevo.</p>
+    <p id="boot-diag" style="font-size:12px;opacity:.85;margin-top:6px"></p>
+    <button onclick="location.reload()">Reintentar</button>
+  </div>
+</div>
+<script>
+  // Si la app no terminó de cargar en 8 segundos (típicamente mala
+  // señal trabando alguna de las librerías externas), muestra el botón
+  // de reintentar en vez de dejar la pantalla pegada para siempre.
+  window.__bootTimer = setTimeout(function () {
+    var r = document.getElementById("boot-retry");
+    if (r) r.style.display = "flex";
+    var checks = [["React", window.React], ["ReactDOM", window.ReactDOM], ["Firebase", window.firebase], ["XLSX", window.XLSX], ["Tailwind", window.tailwind]];
+    var lines = checks.map(function (c) { return c[0] + ": " + (c[1] ? "OK" : "NO CARGO"); });
+    if (window.__failed && window.__failed.length) lines.push("Fallo: " + window.__failed.join(", "));
+    var d = document.getElementById("boot-diag");
+    if (d) d.textContent = lines.join(" | ");
+  }, 8000);
+</script>
+
+<script src="app.js"></script>
+
+<!-- Limpieza: si el celular todavía tiene un Service Worker de la versión
+     instalable, lo desinstala y borra su caché para que la app cargue
+     directo desde internet, como antes. -->
+<script>
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.getRegistrations().then(function (regs) {
+      regs.forEach(function (r) { r.unregister(); });
+    });
+  }
+  if ("caches" in window) {
+    caches.keys().then(function (keys) {
+      keys.forEach(function (k) { caches.delete(k); });
+    });
+  }
+</script>
+</body>
+</html>
